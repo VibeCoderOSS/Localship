@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="ocean" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1e293b;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="teal" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#5eead4;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#14b8a6;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Background Container -->
+  <rect width="512" height="512" rx="128" fill="url(#ocean)" />
+  
+  <!-- Outer Ring / Compass -->
+  <circle cx="256" cy="256" r="180" fill="none" stroke="#334155" stroke-width="8" stroke-dasharray="40 20" opacity="0.5" />
+  
+  <!-- Main Ship/Anchor Icon -->
+  <path d="M256 120 V 392 M 192 180 L 320 180" stroke="url(#teal)" stroke-width="32" stroke-linecap="round" />
+  <path d="M160 300 C 160 360, 200 392, 256 392 C 312 392, 352 360, 352 300" fill="none" stroke="url(#teal)" stroke-width="32" stroke-linecap="round" />
+  
+  <!-- Tech Nodes -->
+  <circle cx="256" cy="120" r="24" fill="#0f172a" stroke="url(#teal)" stroke-width="8" />
+  <circle cx="160" cy="300" r="16" fill="#5eead4" />
+  <circle cx="352" cy="300" r="16" fill="#5eead4" />
+</svg>

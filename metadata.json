@@ -1,0 +1,5 @@
+{
+  "name": "LocalShip",
+  "description": "A minimalist, privacy-focused app builder using local LLMs.",
+  "requestFramePermissions": []
+}
