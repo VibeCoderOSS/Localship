@@ -80,3 +80,6 @@ npm run test:stream-memory
 
 - The app is designed for local/offline workflows.
 - External runtime CDNs are intentionally avoided.
+- This project is currently in **beta**.
+- It has been specifically tested with [`mlx-community/Qwen3-Coder-Next-8bit`](https://huggingface.co/mlx-community/Qwen3-Coder-Next-8bit).
+- Support and behavior with other models have not been tested yet.
