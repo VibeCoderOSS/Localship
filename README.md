@@ -24,6 +24,28 @@ Build and ship React/Electron apps with local LLMs, offline-first.
 - A local LLM server exposing an OpenAI-compatible API
 - macOS/Windows/Linux (for target-specific native builds)
 
+## Installation
+
+Clone and install:
+
+```bash
+git clone https://github.com/VibeCoderOSS/Localship.git
+cd Localship
+npm install
+```
+
+If vendor/setup assets were not prepared automatically, run:
+
+```bash
+npm run prepare
+```
+
+Start your local LLM server, then launch the app:
+
+```bash
+npm run electron:dev
+```
+
 ## Development
 
 Install dependencies:
