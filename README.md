@@ -21,7 +21,9 @@ Build and ship React/Electron apps with local LLMs, offline-first.
 ## Prerequisites
 
 - Node.js 18+ and npm
-- A local LLM server exposing an OpenAI-compatible API
+- LM Studio installed and running (or another OpenAI-compatible local server)
+- At least one LLM loaded in memory in LM Studio
+- LM Studio local server enabled (OpenAI-compatible endpoint)
 - macOS/Windows/Linux (for target-specific native builds)
 
 ## Installation
@@ -40,7 +42,13 @@ If vendor/setup assets were not prepared automatically, run:
 npm run prepare
 ```
 
-Start your local LLM server, then launch the app:
+Open LM Studio and prepare the model runtime:
+
+1. Load at least one model into memory.
+2. Enable the local server (OpenAI-compatible API).
+3. Confirm the endpoint is reachable (default: `http://localhost:1234/v1/chat/completions`).
+
+Then launch the app:
 
 ```bash
 npm run electron:dev
@@ -105,3 +113,13 @@ npm run test:stream-memory
 - This project is currently in **beta**.
 - It has been specifically tested with [`mlx-community/Qwen3-Coder-Next-8bit`](https://huggingface.co/mlx-community/Qwen3-Coder-Next-8bit).
 - Support and behavior with other models have not been tested yet.
+
+## License
+
+LocalShip is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.  
+See `/Users/simonegli/Downloads/localship/LICENSE`.
+
+Third-party/runtime notices included in this repository:
+
+- `release/mac-arm64/LICENSE` (Electron MIT license)
+- `release/mac-arm64/LICENSES.chromium.html` (Chromium third-party licenses)
