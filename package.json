@@ -3,6 +3,7 @@
   "name": "localship-builder",
   "version": "1.0.6",
   "description": "LocalShip - Build and Ship Native Apps Locally",
+  "license": "AGPL-3.0-only",
   "main": "electron-main.js",
   "scripts": {
     "dev": "vite",
