@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { PreviewStatus, ProjectFiles } from '../types';
 import * as Babel from '@babel/standalone';
 import { runPreviewPreflight } from '../utils/projectUtils';
+import { base64ToArrayBuffer, decodeAssetPayload, normalizeAssetPath } from '../utils/assetUtils';
 
 interface PreviewFrameProps {
   files: ProjectFiles;
@@ -412,6 +413,30 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
       const runUrls: string[] = [];
       const cssStubUrl = URL.createObjectURL(new Blob(['export default {};'], { type: 'text/javascript' }));
       runUrls.push(cssStubUrl);
+      const assetRuntimeMap: Record<string, string> = {};
+
+      Object.entries(files).forEach(([name, raw]) => {
+        const payload = decodeAssetPayload(String(raw || ''));
+        if (!payload) return;
+        const normalized = normalizeAssetPath(name);
+        try {
+          const byteBuffer = base64ToArrayBuffer(payload.base64);
+          const blobUrl = URL.createObjectURL(new Blob([byteBuffer], { type: payload.meta.mime || 'application/octet-stream' }));
+          runUrls.push(blobUrl);
+
+          const moduleSource = `const url = ${JSON.stringify(blobUrl)}; export default url; export const src = url;`;
+          const moduleUrl = URL.createObjectURL(new Blob([moduleSource], { type: 'text/javascript' }));
+          runUrls.push(moduleUrl);
+
+          importMap.imports[`local-project/${normalized}`] = moduleUrl;
+          assetRuntimeMap[normalized] = blobUrl;
+          assetRuntimeMap[`/${normalized}`] = blobUrl;
+          assetRuntimeMap[`./${normalized}`] = blobUrl;
+        } catch (e) {
+          const msg = `Asset decode failed for ${name}: ${e instanceof Error ? e.message : 'unknown error'}`;
+          currentRunErrorsRef.current = Array.from(new Set([...currentRunErrorsRef.current, msg]));
+        }
+      });
 
       const sourceBundle = Object.entries(files)
         .filter(([name]) => name.match(/\.(tsx|ts|jsx|js)$/))
@@ -488,7 +513,7 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
       };
       
       Object.entries(files).forEach(([name, raw]) => {
-        if (name.match(/\.(tsx|ts|js)$/)) {
+        if (name.match(/\.(tsx|ts|jsx|js)$/)) {
           try {
             const transformed = Babel.transform(raw as string, {
               presets: [['react', { runtime: 'classic' }], 'typescript'],
@@ -515,7 +540,7 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
             
             const url = URL.createObjectURL(new Blob([transformed || ''], { type: 'text/javascript' }));
             runUrls.push(url);
-            const cleanName = name.replace(/\.(tsx|ts|js)$/, '');
+            const cleanName = name.replace(/\.(tsx|ts|jsx|js)$/, '');
             importMap.imports[`local-project/${cleanName}`] = url;
             importMap.imports[`local-project/${name}`] = url;
             const noIndex = cleanName.replace(/\/index$/, '');
@@ -606,12 +631,67 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
         ? `local-project/${preflight.entryFile.replace(/\.(tsx|ts|jsx|js)$/i, '')}`
         : 'local-project/index';
       let html = preflight.syntheticIndexHtml || files['index.html'] || FALLBACK_HTML;
+
+      const resolveAssetRef = (value: string): string | null => {
+        const normalized = value.replace(/\\/g, '/').replace(/^\.?\//, '');
+        return assetRuntimeMap[value] || assetRuntimeMap[`./${normalized}`] || assetRuntimeMap[`/${normalized}`] || assetRuntimeMap[normalized] || null;
+      };
+
+      if (Object.keys(assetRuntimeMap).length > 0) {
+        html = html.replace(/(src|href|poster)=["']([^"']+)["']/gi, (full, attr, val) => {
+          const resolved = resolveAssetRef(String(val));
+          if (!resolved) return full;
+          return `${attr}="${resolved}"`;
+        });
+      }
+
       // Prevent raw module scripts from user HTML from bypassing our transformed import map pipeline.
       html = html.replace(/<script[^>]*type=["']module["'][^>]*src=["'][^"']+["'][^>]*>\s*<\/script>/gi, '');
       html = html.replace(/<script[^>]*type=["']importmap["'][^>]*>[\s\S]*?<\/script>/gi, '');
       html = html.replace(/<link[^>]+href=["'][^"']*input\.css[^"']*["'][^>]*>/gi, '');
+      const assetRewriteScript = Object.keys(assetRuntimeMap).length > 0 ? `
+        <script>
+          (function() {
+            const assetMap = ${JSON.stringify(assetRuntimeMap)};
+            const attrs = ['src', 'href', 'poster'];
+            const normalize = (v) => String(v || '').replace(/\\\\/g, '/').replace(/^\\.?\\//, '');
+            const resolve = (v) => {
+              const n = normalize(v);
+              return assetMap[v] || assetMap['./' + n] || assetMap['/' + n] || assetMap[n] || null;
+            };
+            const patchNode = (node) => {
+              if (!node || !node.getAttribute) return;
+              attrs.forEach((attr) => {
+                const current = node.getAttribute(attr);
+                if (!current) return;
+                const next = resolve(current);
+                if (next && next !== current) node.setAttribute(attr, next);
+              });
+            };
+            const walk = (root) => {
+              if (!root || !root.querySelectorAll) return;
+              patchNode(root);
+              root.querySelectorAll('[src],[href],[poster]').forEach((el) => patchNode(el));
+            };
+            walk(document);
+            const obs = new MutationObserver((mutations) => {
+              mutations.forEach((m) => {
+                if (m.type === 'attributes') {
+                  patchNode(m.target);
+                  return;
+                }
+                m.addedNodes.forEach((node) => {
+                  if (node && node.nodeType === 1) walk(node);
+                });
+              });
+            });
+            obs.observe(document.documentElement || document.body, { childList: true, subtree: true, attributes: true, attributeFilter: attrs });
+          })();
+        </script>
+      ` : '';
       const injected = `
         ${harnessScript}
+        ${assetRewriteScript}
         <style id="__tailwind_injected">body { margin: 0; padding: 0; font-family: sans-serif; } ${compiledCss}</style>
         <script type="importmap">${JSON.stringify(importMap)}</script>
         <script type="module">

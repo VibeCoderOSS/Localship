@@ -4,6 +4,7 @@ import saveAs from 'file-saver';
 import { ELECTRON_MAIN_JS, PRELOAD_JS, PACKAGE_JSON, README_MD } from '../constants';
 import { ProjectDetails, BuildData, TargetPlatform, ProjectFiles } from '../types';
 import { processHtmlForOffline } from './projectUtils';
+import { base64ToUint8Array, decodeAssetPayload } from './assetUtils';
 
 // Browser-based ZIP export
 export const exportProject = async (
@@ -20,6 +21,11 @@ export const exportProject = async (
 
   // 1. The Application Logic (Write individual files)
   Object.entries(files).forEach(([filename, content]) => {
+    const assetPayload = decodeAssetPayload(String(content || ''));
+    if (assetPayload) {
+      folder.file(filename, base64ToUint8Array(assetPayload.base64));
+      return;
+    }
     // OFFLINE PROCESSING: Ensure HTML points to local assets instead of CDN
     if (filename.endsWith('.html')) {
       folder.file(filename, processHtmlForOffline(content));

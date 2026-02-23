@@ -14,6 +14,7 @@ import SimpleComposer from './components/SimpleComposer';
 import { buildSecondAttemptPrompt, pickBestCandidate, scoreRunCandidate, shouldTriggerSecondAttempt } from './services/runOrchestrator';
 import { getChangedFilesBetween } from './services/patchTransaction';
 import { composeSimplePrompt } from './utils/promptComposer';
+import { arrayBufferToBase64, encodeAssetPayload, inferAssetMimeType } from './utils/assetUtils';
 
 const INITIAL_INDEX_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -97,6 +98,7 @@ const DEFAULT_AUTO_REPAIR_ATTEMPTS = 3;
 const LOW_CONFIDENCE_THRESHOLD = 0.35;
 const DEFAULT_DEBUG_TEXT_BUDGET = 400000;
 const DEFAULT_STREAM_PARSE_CADENCE_MS = 120;
+const MAX_ASSET_UPLOAD_BYTES = 12 * 1024 * 1024;
 
 const dirnameOf = (file: string): string => {
   const parts = file.split('/');
@@ -208,6 +210,29 @@ const areProjectFilesEqual = (a: ProjectFiles, b: ProjectFiles): boolean => {
 
 const getChangedFiles = (before: ProjectFiles, after: ProjectFiles): string[] => {
   return getChangedFilesBetween(before, after);
+};
+
+const sanitizeAssetFileName = (name: string): string => {
+  return name
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()!
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/_{2,}/g, '_');
+};
+
+const uniqueAssetPath = (existing: ProjectFiles, rawName: string): string => {
+  const safe = sanitizeAssetFileName(rawName || 'asset.bin') || 'asset.bin';
+  const dot = safe.lastIndexOf('.');
+  const base = dot > 0 ? safe.slice(0, dot) : safe;
+  const ext = dot > 0 ? safe.slice(dot) : '';
+  let idx = 1;
+  let candidate = `assets/${safe}`;
+  while (existing[candidate] !== undefined) {
+    candidate = `assets/${base}-${idx}${ext}`;
+    idx += 1;
+  }
+  return candidate;
 };
 
 const appendWithCap = (current: string, delta: string, cap: number): { next: string; dropped: number } => {
@@ -400,8 +425,58 @@ const App: React.FC = () => {
   const prevUiModeRef = useRef<'simple' | 'advanced'>('simple');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isBuildModalOpen, setIsBuildModalOpen] = useState(false);
+  const assetInputRef = useRef<HTMLInputElement>(null);
   const hasUserPrompts = chatState.messages.some((msg) => msg.role === 'user');
   const isIterationContext = hasUserPrompts || !isInitialStarterProject(chatState.files);
+
+  const openAssetPicker = useCallback(() => {
+    assetInputRef.current?.click();
+  }, []);
+
+  const handleAssetInputChange = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = Array.from(event.target.files || []);
+    if (picked.length === 0) return;
+
+    const valid: Array<{ originalName: string; encoded: string }> = [];
+    const rejected: string[] = [];
+
+    for (const file of picked) {
+      if (file.size > MAX_ASSET_UPLOAD_BYTES) {
+        rejected.push(`${file.name} (too large, max ${Math.round(MAX_ASSET_UPLOAD_BYTES / (1024 * 1024))}MB)`);
+        continue;
+      }
+      try {
+        const base64 = arrayBufferToBase64(await file.arrayBuffer());
+        const encoded = encodeAssetPayload({
+          base64,
+          mime: file.type || inferAssetMimeType(file.name),
+          name: file.name,
+          size: file.size
+        });
+        valid.push({ originalName: file.name, encoded });
+      } catch {
+        rejected.push(`${file.name} (read failed)`);
+      }
+    }
+
+    if (valid.length > 0) {
+      setChatState((prev) => {
+        const nextFiles: ProjectFiles = { ...prev.files };
+        valid.forEach((asset) => {
+          const targetPath = uniqueAssetPath(nextFiles, asset.originalName);
+          nextFiles[targetPath] = asset.encoded;
+        });
+        const status = rejected.length > 0
+          ? `Added ${valid.length} asset(s). Skipped ${rejected.length}.`
+          : `Added ${valid.length} asset(s).`;
+        return { ...prev, files: nextFiles, statusMessage: status };
+      });
+    } else if (rejected.length > 0) {
+      setChatState((prev) => ({ ...prev, statusMessage: `No assets added. Skipped ${rejected.length} file(s).` }));
+    }
+
+    event.target.value = '';
+  }, []);
 
   // Monotonic Session Tracking
   const totalMarkers = useRef(0);
@@ -1386,6 +1461,19 @@ const App: React.FC = () => {
         </div>
 
         <div className="p-4 border-t border-slate-200 dark:border-ocean-800 bg-white dark:bg-ocean-900 shrink-0">
+          <div className="mb-3 flex items-center justify-end">
+            <button
+              onClick={openAssetPicker}
+              className="group inline-flex h-9 items-center gap-2 px-3 bg-slate-100 dark:bg-ocean-800 border border-slate-200 dark:border-ocean-700 rounded-lg text-slate-600 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-ocean-700 transition-colors"
+              title="Add assets"
+              aria-label="Add assets"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+              </svg>
+              <span className="text-[10px] font-bold uppercase tracking-widest">Add assets</span>
+            </button>
+          </div>
           {(config.uiMode || 'simple') === 'simple' ? (
             <SimpleComposer
               draft={simpleDraft}
@@ -1489,6 +1577,14 @@ const App: React.FC = () => {
              </div>
            </div>
         </div>
+        <input
+          ref={assetInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          accept="image/*,audio/*,video/*,.glb,.gltf,.bin,.woff,.woff2,.ttf,.otf,.pdf"
+          onChange={handleAssetInputChange}
+        />
       </div>
 
       <ConfigModal

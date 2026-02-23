@@ -12,6 +12,7 @@ import {
 import { getFileContentsContext, validateProject } from '../utils/projectUtils';
 import { lookupModelHint } from './modelRegistry';
 import { getChangedFilesBetween } from './patchTransaction';
+import { isAssetFilename, isEncodedAssetContent, toAssetContextPlaceholder } from '../utils/assetUtils';
 
 export type ModelTier = 'small' | 'large' | 'unknown';
 export interface ModelProfile {
@@ -320,12 +321,26 @@ const normalizeText = (text: string): string => {
 };
 
 const buildFileContext = (files: ProjectFiles, prompt: string): string => {
-  const allEntries = Object.entries(files);
-  const totalChars = allEntries.reduce((n, [name, content]) => n + name.length + content.length + 32, 0);
-  if (totalChars <= MAX_FILE_CONTEXT_CHARS) return getFileContentsContext(files);
+  const allEntries = Object.entries(files).map(([name, content]) => {
+    const text = String(content || '');
+    const isAsset = isAssetFilename(name) || isEncodedAssetContent(text);
+    return {
+      name,
+      content: isAsset ? toAssetContextPlaceholder(name, text) : text
+    };
+  });
+
+  const totalChars = allEntries.reduce((n, entry) => n + entry.name.length + entry.content.length + 32, 0);
+  if (totalChars <= MAX_FILE_CONTEXT_CHARS) {
+    const contextFiles: ProjectFiles = {};
+    allEntries.forEach((entry) => {
+      contextFiles[entry.name] = entry.content;
+    });
+    return getFileContentsContext(contextFiles);
+  }
 
   const promptLower = prompt.toLowerCase();
-  const scored = allEntries.map(([name, content]) => {
+  const scored = allEntries.map(({ name, content }) => {
     const base = name.split('/').pop() || name;
     let score = 0;
     if (ESSENTIAL_FILES.includes(name)) score += 100;
@@ -347,7 +362,7 @@ const buildFileContext = (files: ProjectFiles, prompt: string): string => {
     used += cost;
   }
 
-  const omitted = Object.keys(files).length - Object.keys(picked).length;
+  const omitted = allEntries.length - Object.keys(picked).length;
   const context = getFileContentsContext(picked);
   return omitted > 0 ? `${context}\n\n[CONTEXT NOTE]\n- Omitted ${omitted} low-priority files to fit context budget.` : context;
 };
@@ -1304,8 +1319,14 @@ export const generateAppCode = async (
   attemptMeta?: { attemptIndex?: number; attemptType?: 'primary' | 'retry' | 'repair' }
 ): Promise<StreamUpdate> => {
   const protocolFiles: ProjectFiles = {};
+  const assetFileNames: string[] = [];
   Object.entries(currentFiles).forEach(([name, content]) => {
-     if (!name.includes('assets/vendor/') && !name.includes('node_modules')) protocolFiles[name] = content;
+     if (name.includes('assets/vendor/') || name.includes('node_modules')) return;
+     if (isAssetFilename(name) || isEncodedAssetContent(String(content || ''))) {
+       assetFileNames.push(name);
+       return;
+     }
+     protocolFiles[name] = content;
   });
   
   const baseFiles: ProjectFiles = { ...protocolFiles };
@@ -1434,7 +1455,10 @@ export const generateAppCode = async (
     throw new Error('Unknown model size. Choose small-model or large-model mode in settings before running generation.');
   }
   const adaptiveAddendum = getAdaptivePromptAddendum(modelProfile);
-  const fileContext = `[PROJECT MAP]\n${buildProjectMapWithHints(protocolFiles)}\n\n[FILE CONTENTS]\n${buildFileContext(protocolFiles, prompt)}`;
+  const assetSection = assetFileNames.length > 0
+    ? `\n\n[ASSETS]\n${assetFileNames.sort().map((name) => `- ${name}`).join('\n')}\n- Prefer importing assets from these paths (e.g. import hero from './assets/hero.png').`
+    : '';
+  const fileContext = `[PROJECT MAP]\n${buildProjectMapWithHints(protocolFiles)}${assetSection}\n\n[FILE CONTENTS]\n${buildFileContext(protocolFiles, prompt)}`;
   const userContent = `${strictContract}\n\n${fileContext}\n\n[USER REQUEST]\n${prompt}`;
   const messages = [{ role: 'system', content: `${config.systemPrompt}\n\n${adaptiveAddendum}` }, ...optimizeHistory(history), { role: 'user', content: userContent }];
 

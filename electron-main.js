@@ -85,10 +85,18 @@ app.on('activate', () => {
 ipcMain.handle('compile-tailwind', async (event, { files, configCode, cssInput }) => {
   try {
     // Transform files into Tailwind's expected content format
-    const content = Object.entries(files || {}).map(([filename, code]) => ({
-      raw: code,
-      extension: filename.split('.').pop()
-    })).filter((entry) => typeof entry.raw === 'string' && entry.raw.trim().length > 0);
+    const content = Object.entries(files || {})
+      .filter(([filename, code]) => {
+        const ext = path.extname(filename).toLowerCase();
+        if (ASSET_EXTENSIONS.has(ext)) return false;
+        if (isEncodedAssetText(String(code || ''))) return false;
+        return true;
+      })
+      .map(([filename, code]) => ({
+        raw: code,
+        extension: filename.split('.').pop()
+      }))
+      .filter((entry) => typeof entry.raw === 'string' && entry.raw.trim().length > 0);
 
     // Simple config parsing
     let userConfig = { content: ["./**/*.{js,ts,jsx,tsx,html}"] };
@@ -136,6 +144,72 @@ const isIgnoredPath = (segment) => {
   return ['node_modules', '.localship', '.git', 'dist', 'build', 'release', 'out'].includes(segment);
 };
 
+const ASSET_PREFIX = '__LOCALSHIP_ASSET_V1__:';
+const ASSET_EXTENSIONS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp',
+  '.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a',
+  '.mp4', '.webm', '.mov',
+  '.glb', '.gltf', '.bin',
+  '.woff', '.woff2', '.ttf', '.otf',
+  '.pdf'
+]);
+const TEXT_EXTENSIONS = new Set(['.html', '.tsx', '.ts', '.js', '.jsx', '.css', '.json', '.md', '.txt']);
+const MIME_BY_EXTENSION = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.bmp': 'image/bmp',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+  '.flac': 'audio/flac',
+  '.aac': 'audio/aac',
+  '.m4a': 'audio/mp4',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.glb': 'model/gltf-binary',
+  '.gltf': 'model/gltf+json',
+  '.bin': 'application/octet-stream',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.pdf': 'application/pdf'
+};
+
+const inferMimeType = (filename) => MIME_BY_EXTENSION[path.extname(filename).toLowerCase()] || 'application/octet-stream';
+const isEncodedAssetText = (value) => typeof value === 'string' && value.startsWith(ASSET_PREFIX);
+
+const encodeBinaryAsset = (filename, buffer) => {
+  const meta = {
+    mime: inferMimeType(filename),
+    name: path.basename(filename),
+    size: buffer.length
+  };
+  return `${ASSET_PREFIX}${JSON.stringify(meta)}\n${buffer.toString('base64')}`;
+};
+
+const decodeBinaryAsset = (content) => {
+  if (!isEncodedAssetText(content)) return null;
+  const split = content.indexOf('\n');
+  if (split < 0) return null;
+  const metaRaw = content.slice(ASSET_PREFIX.length, split).trim();
+  const base64 = content.slice(split + 1).trim();
+  if (!metaRaw || !base64) return null;
+  try {
+    const meta = JSON.parse(metaRaw);
+    const buffer = Buffer.from(base64, 'base64');
+    return { meta, buffer };
+  } catch {
+    return null;
+  }
+};
+
 const readProjectFiles = (projectDir) => {
   const files = {};
   const walk = (dir) => {
@@ -150,10 +224,13 @@ const readProjectFiles = (projectDir) => {
       }
       const rel = path.relative(projectDir, fullPath);
       const ext = path.extname(entry.name).toLowerCase();
-      const allowed = ['.html', '.tsx', '.ts', '.js', '.jsx', '.css', '.json', '.md', '.txt', '.config.js'];
-      if (!allowed.includes(ext)) return;
+      if (!TEXT_EXTENSIONS.has(ext) && !ASSET_EXTENSIONS.has(ext)) return;
       try {
-        files[rel] = fs.readFileSync(fullPath, 'utf-8');
+        if (TEXT_EXTENSIONS.has(ext)) {
+          files[rel] = fs.readFileSync(fullPath, 'utf-8');
+        } else {
+          files[rel] = encodeBinaryAsset(rel, fs.readFileSync(fullPath));
+        }
       } catch {}
     });
   };
@@ -391,7 +468,12 @@ ipcMain.handle('build-app', async (event, data) => {
       const writeFile = (filename, content) => {
         const targetPath = path.join(buildRoot, filename);
         fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-        fs.writeFileSync(targetPath, content, 'utf-8');
+        const decodedAsset = decodeBinaryAsset(typeof content === 'string' ? content : '');
+        if (decodedAsset) {
+          fs.writeFileSync(targetPath, decodedAsset.buffer);
+          return;
+        }
+        fs.writeFileSync(targetPath, typeof content === 'string' ? content : String(content ?? ''), 'utf-8');
       };
 
       const resolveEntry = () => {
@@ -496,10 +578,17 @@ export default defineConfig({
 
       const compileCssForBuild = async () => {
         const cssInput = projectFiles['input.css'] || '@tailwind base;\n@tailwind components;\n@tailwind utilities;';
-        const content = Object.entries(projectFiles).map(([filename, code]) => ({
-          raw: code,
-          extension: filename.split('.').pop()
-        }));
+        const content = Object.entries(projectFiles)
+          .filter(([filename, code]) => {
+            const ext = path.extname(filename).toLowerCase();
+            if (ASSET_EXTENSIONS.has(ext)) return false;
+            if (isEncodedAssetText(String(code || ''))) return false;
+            return true;
+          })
+          .map(([filename, code]) => ({
+            raw: code,
+            extension: filename.split('.').pop()
+          }));
         let userConfig = { content: ["./**/*.{js,ts,jsx,tsx,html}"] };
         const configCode = projectFiles['tailwind.config.js'] || '';
         try {

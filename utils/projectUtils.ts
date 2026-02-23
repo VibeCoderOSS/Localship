@@ -1,5 +1,6 @@
 import { ProjectFiles } from '../types';
 import * as Babel from '@babel/standalone';
+import { isAssetFilename, isEncodedAssetContent, toAssetContextPlaceholder } from './assetUtils';
 
 export const resolvePath = (baseFile: string, targetPath: string): string => {
   if (!targetPath.startsWith('.')) return targetPath;
@@ -37,7 +38,13 @@ export const getFileStructureSummary = (files: ProjectFiles): string => {
 export const getFileContentsContext = (files: ProjectFiles): string => {
   return Object.entries(files)
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([name, content]) => `<!-- filename: ${name} -->\n${content}`)
+    .map(([name, content]) => {
+      const raw = String(content || '');
+      const text = (isAssetFilename(name) || isEncodedAssetContent(raw))
+        ? toAssetContextPlaceholder(name, raw)
+        : raw;
+      return `<!-- filename: ${name} -->\n${text}`;
+    })
     .join('\n\n');
 };
 
@@ -106,49 +113,55 @@ export const validateProject = (files: ProjectFiles): ValidationResult => {
 
   // 5. Deterministische UI Visibility & Guardrails
   Object.entries(files).forEach(([name, content]) => {
+    const text = String(content || '');
+    if (isAssetFilename(name) || isEncodedAssetContent(text)) return;
+    const isCodeModule = /\.(tsx?|jsx?)$/i.test(name);
+
     // 5a. Import Target Exists (relative only; allow extensionless specifiers)
-    const specRegex = /import\s+[\s\S]*?from\s+['"]([^'"]+)['"]/g;
-    let specMatch;
-    while ((specMatch = specRegex.exec(content)) !== null) {
-      const spec = specMatch[1];
-      if (spec.startsWith('local-project/')) {
-        errors.push(`${name}: Invalid import "${spec}". Use relative imports like ./Component.tsx.`);
-        continue;
+    if (isCodeModule) {
+      const specRegex = /import\s+[\s\S]*?from\s+['"]([^'"]+)['"]/g;
+      let specMatch;
+      while ((specMatch = specRegex.exec(text)) !== null) {
+        const spec = specMatch[1];
+        if (spec.startsWith('local-project/')) {
+          errors.push(`${name}: Invalid import "${spec}". Use relative imports like ./Component.tsx.`);
+          continue;
+        }
+        if (spec.startsWith('./') || spec.startsWith('../')) {
+          const resolved = resolveImportToExistingFile(files, name, spec);
+          if (!resolved) {
+            errors.push(`${name}: Import not found: ${spec}.`);
+          }
+        }
       }
-      if (spec.startsWith('./') || spec.startsWith('../')) {
+
+      // 5a-2. Relative default imports require a default export in target module.
+      const defaultImportRegex = /import\s+([A-Za-z_$][\w$]*)\s*(?:,\s*{[^}]*})?\s+from\s+['"]([^'"]+)['"]/g;
+      let defaultMatch;
+      while ((defaultMatch = defaultImportRegex.exec(text)) !== null) {
+        const importedName = defaultMatch[1];
+        const spec = defaultMatch[2];
+        if (!(spec.startsWith('./') || spec.startsWith('../'))) continue;
         const resolved = resolveImportToExistingFile(files, name, spec);
-        if (!resolved) {
-          errors.push(`${name}: Import not found: ${spec}.`);
+        if (!resolved) continue;
+        const targetContent = files[resolved] || '';
+        if (!/\.(tsx?|jsx?)$/i.test(resolved)) continue;
+
+        const hasDefaultExport =
+          /export\s+default\s+/m.test(targetContent) ||
+          /export\s*{\s*default\s*(?:as\s+[A-Za-z_$][\w$]*)?\s*}/m.test(targetContent);
+
+        if (!hasDefaultExport) {
+          errors.push(`${name}: Default import "${spec}" (${importedName}) requires a default export in ${resolved}.`);
         }
       }
     }
 
-    // 5a-2. Relative default imports require a default export in target module.
-    const defaultImportRegex = /import\s+([A-Za-z_$][\w$]*)\s*(?:,\s*{[^}]*})?\s+from\s+['"]([^'"]+)['"]/g;
-    let defaultMatch;
-    while ((defaultMatch = defaultImportRegex.exec(content)) !== null) {
-      const importedName = defaultMatch[1];
-      const spec = defaultMatch[2];
-      if (!(spec.startsWith('./') || spec.startsWith('../'))) continue;
-      const resolved = resolveImportToExistingFile(files, name, spec);
-      if (!resolved) continue;
-      const targetContent = files[resolved] || '';
-      if (!/\.(tsx?|jsx?)$/i.test(resolved)) continue;
-
-      const hasDefaultExport =
-        /export\s+default\s+/m.test(targetContent) ||
-        /export\s*{\s*default\s*(?:as\s+[A-Za-z_$][\w$]*)?\s*}/m.test(targetContent);
-
-      if (!hasDefaultExport) {
-        errors.push(`${name}: Default import "${spec}" (${importedName}) requires a default export in ${resolved}.`);
-      }
-    }
-
     // 5b. Grid Sizing
-    if (name.endsWith('.tsx') && (content.includes('grid-cols-') || content.includes('gridTemplateColumns'))) {
-      const hasRows = content.includes('grid-rows-') || content.includes('auto-rows-') || content.includes('gridTemplateRows');
-      const hasAspect = content.includes('aspect-square');
-      const hasHeight = content.includes('h-') || content.includes('height:') || content.includes('h[');
+    if (name.endsWith('.tsx') && (text.includes('grid-cols-') || text.includes('gridTemplateColumns'))) {
+      const hasRows = text.includes('grid-rows-') || text.includes('auto-rows-') || text.includes('gridTemplateRows');
+      const hasAspect = text.includes('aspect-square');
+      const hasHeight = text.includes('h-') || text.includes('height:') || text.includes('h[');
       
       if (!hasRows && !hasAspect && !hasHeight) {
         errors.push(`${name}: Grid layout detected without explicit rows, aspect-square, or height. Container might be zero-height.`);
@@ -156,17 +169,17 @@ export const validateProject = (files: ProjectFiles): ValidationResult => {
     }
     
     // 5c. Forbidden Types
-    if (content.includes('NodeJS.Timeout')) {
+    if (isCodeModule && text.includes('NodeJS.Timeout')) {
       errors.push(`${name}: Forbidden 'NodeJS.Timeout' used. Use 'ReturnType<typeof setTimeout>' instead.`);
     }
 
     // 5d. JSX Component Usage Without Definition/Import (best-effort)
     if (name.endsWith('.tsx')) {
-      const tagMatches = Array.from(content.matchAll(/<([A-Z][A-Za-z0-9_]*)\b/g)).map(m => m[1]);
+      const tagMatches = Array.from(text.matchAll(/<([A-Z][A-Za-z0-9_]*)\b/g)).map(m => m[1]);
       const uniqueTags = Array.from(new Set(tagMatches));
       uniqueTags.forEach((tag) => {
-        const hasImport = new RegExp(`import\\s+[\\s\\S]*?\\b${tag}\\b`, 'm').test(content);
-        const hasDecl = new RegExp(`(const|function|class)\\s+${tag}\\b`, 'm').test(content);
+        const hasImport = new RegExp(`import\\s+[\\s\\S]*?\\b${tag}\\b`, 'm').test(text);
+        const hasDecl = new RegExp(`(const|function|class)\\s+${tag}\\b`, 'm').test(text);
         if (!hasImport && !hasDecl) {
           errors.push(`${name}: JSX tag <${tag}> used but "${tag}" is not imported or defined.`);
         }
@@ -174,9 +187,9 @@ export const validateProject = (files: ProjectFiles): ValidationResult => {
     }
 
     // 5e. Syntax Validation for JS/TS files
-    if (/\.(tsx?|jsx?)$/i.test(name)) {
+    if (isCodeModule) {
       try {
-        Babel.transform(content, {
+        Babel.transform(text, {
           presets: [['react', { runtime: 'classic' }], 'typescript'],
           filename: name,
           sourceType: 'module'
