@@ -2,7 +2,16 @@
 
 Build and ship React/Electron apps with local LLMs, offline-first.
 
-![Ship-42 Logo](public/ship42-logo.jpeg)
+## UI Preview
+
+### Basic Mode
+![LocalShip Basic Mode](UI_Images/Basic_Version.png)
+
+### Developer Mode
+![LocalShip Developer Mode](UI_Images/Dev_Version.png)
+
+### Settings
+![LocalShip Settings](UI_Images/Settings.png)
 
 ## What It Does
 
@@ -117,9 +126,15 @@ npm run test:stream-memory
 ## License
 
 LocalShip is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.  
-See `/Users/simonegli/Downloads/localship/LICENSE`.
+See [LICENSE](LICENSE).
 
 Third-party/runtime notices included in this repository:
 
 - `release/mac-arm64/LICENSE` (Electron MIT license)
 - `release/mac-arm64/LICENSES.chromium.html` (Chromium third-party licenses)
+
+## Brand
+
+<p align="center">
+  <img src="public/ship42-logo.jpeg" alt="Ship-42 Logo" width="120" />
+</p>
