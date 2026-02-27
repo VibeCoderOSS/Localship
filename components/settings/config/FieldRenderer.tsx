@@ -6,6 +6,7 @@ import InputField from './fields/InputField';
 import NumberField from './fields/NumberField';
 import SelectField from './fields/SelectField';
 import ToggleField from './fields/ToggleField';
+import { DEFAULT_LM_STUDIO_API_URL, DEFAULT_OLLAMA_API_URL } from '../../../constants';
 
 interface FieldRendererProps {
   field: FieldSpec;
@@ -43,6 +44,42 @@ const FieldRenderer: React.FC<FieldRendererProps> = ({
   if (field.visibleIf && !field.visibleIf(config, isElectron)) return null;
 
   const disabled = field.disabledIf ? field.disabledIf(config) : false;
+
+  if (field.controlType === 'provider-cards' && field.key === 'apiProvider') {
+    const provider = config.apiProvider ?? 'lmstudio';
+    const setProvider = (next: 'lmstudio' | 'ollama') => {
+      setField('apiProvider', next);
+      const currentUrl = String(config.apiUrl || '').trim();
+      const shouldResetUrl =
+        !currentUrl ||
+        currentUrl === DEFAULT_LM_STUDIO_API_URL ||
+        currentUrl === DEFAULT_OLLAMA_API_URL ||
+        currentUrl.includes('/v1/chat/completions') ||
+        currentUrl.includes('/api/chat');
+      if (shouldResetUrl) {
+        setField('apiUrl', next === 'ollama' ? DEFAULT_OLLAMA_API_URL : DEFAULT_LM_STUDIO_API_URL);
+      }
+    };
+
+    const cardClass = (active: boolean) =>
+      `rounded-xl border p-4 text-left transition-colors ${active ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-slate-300 dark:border-ocean-700 bg-white dark:bg-ocean-900 hover:border-blue-300 dark:hover:border-blue-700'}`;
+
+    return (
+      <div>
+        <label className="block text-xs font-bold text-slate-500 dark:text-slate-400 mb-2 uppercase tracking-wide">{field.label}</label>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button type="button" className={cardClass(provider === 'lmstudio')} onClick={() => setProvider('lmstudio')}>
+            <p className="text-sm font-bold text-slate-800 dark:text-white">LM Studio</p>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">OpenAI-compatible endpoint</p>
+          </button>
+          <button type="button" className={cardClass(provider === 'ollama')} onClick={() => setProvider('ollama')}>
+            <p className="text-sm font-bold text-slate-800 dark:text-white">Ollama</p>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">Native API with num_ctx support</p>
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (field.controlType === 'input' && field.key === 'apiUrl') {
     return (
