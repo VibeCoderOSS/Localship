@@ -6,6 +6,7 @@ import {
   ParserStage,
   ParseMode,
   ProviderFamily,
+  ApiProvider,
   ModelLookupMode,
   ModelProfileSource
 } from '../types';
@@ -13,6 +14,7 @@ import { getFileContentsContext, validateProject } from '../utils/projectUtils';
 import { lookupModelHint } from './modelRegistry';
 import { getChangedFilesBetween } from './patchTransaction';
 import { isAssetFilename, isEncodedAssetContent, toAssetContextPlaceholder } from '../utils/assetUtils';
+import { DEFAULT_LM_STUDIO_API_URL, DEFAULT_OLLAMA_API_URL, DEFAULT_OLLAMA_CONTEXT_SIZE } from '../constants';
 
 export type ModelTier = 'small' | 'large' | 'unknown';
 export interface ModelProfile {
@@ -119,6 +121,57 @@ const detectProviderFamilyFromModelId = (modelId: string): Exclude<ProviderFamil
   return 'generic';
 };
 
+const stripTrailingSlash = (value: string): string => value.replace(/\/+$/, '');
+
+export const inferApiProviderFromEndpoint = (apiUrl: string): ApiProvider => {
+  const lower = String(apiUrl || '').toLowerCase();
+  if (lower.includes(':11434') || lower.includes('/api/chat') || lower.includes('/api/tags')) return 'ollama';
+  return 'lmstudio';
+};
+
+const getEffectiveApiProvider = (config: AppConfig): ApiProvider => {
+  if (config.apiProvider === 'lmstudio' || config.apiProvider === 'ollama') return config.apiProvider;
+  return inferApiProviderFromEndpoint(config.apiUrl || '');
+};
+
+const normalizeOllamaChatEndpoint = (apiUrl: string): string => {
+  const input = stripTrailingSlash((apiUrl || '').trim()) || DEFAULT_OLLAMA_API_URL;
+  if (/\/api\/chat$/i.test(input)) return input;
+  if (/\/api\/tags$/i.test(input)) return input.replace(/\/api\/tags$/i, '/api/chat');
+  if (/\/v1\/chat\/completions$/i.test(input)) return input.replace(/\/v1\/chat\/completions$/i, '/api/chat');
+  if (/\/v1\/models$/i.test(input)) return input.replace(/\/v1\/models$/i, '/api/chat');
+  if (/\/v1$/i.test(input)) return input.replace(/\/v1$/i, '/api/chat');
+  if (/\/chat\/completions$/i.test(input)) return input.replace(/\/chat\/completions$/i, '/api/chat');
+  return `${input}/api/chat`;
+};
+
+const normalizeLmStudioChatEndpoint = (apiUrl: string): string => {
+  const input = stripTrailingSlash((apiUrl || '').trim()) || DEFAULT_LM_STUDIO_API_URL;
+  if (/\/v1\/chat\/completions$/i.test(input)) return input;
+  if (/\/v1\/models$/i.test(input)) return input.replace(/\/v1\/models$/i, '/v1/chat/completions');
+  if (/\/v1$/i.test(input)) return `${input}/chat/completions`;
+  if (/\/chat\/completions$/i.test(input)) return input;
+  return `${input}/v1/chat/completions`;
+};
+
+export const resolveChatEndpoint = (apiUrl: string, apiProvider: ApiProvider): string => {
+  return apiProvider === 'ollama'
+    ? normalizeOllamaChatEndpoint(apiUrl)
+    : normalizeLmStudioChatEndpoint(apiUrl);
+};
+
+export const resolveModelsEndpoint = (apiUrl: string, apiProvider: ApiProvider): string => {
+  if (apiProvider === 'ollama') {
+    const chat = normalizeOllamaChatEndpoint(apiUrl);
+    return chat.replace(/\/api\/chat$/i, '/api/tags');
+  }
+  let modelsUrl = apiUrl;
+  if (apiUrl.includes('/chat/completions')) modelsUrl = apiUrl.replace('/chat/completions', '/models');
+  else if (apiUrl.includes('/v1')) modelsUrl = apiUrl.endsWith('/') ? `${apiUrl}models` : `${apiUrl}/models`;
+  else modelsUrl = apiUrl.endsWith('/') ? `${apiUrl}v1/models` : `${apiUrl}/v1/models`;
+  return modelsUrl;
+};
+
 const getEffectiveProviderFamily = (config: AppConfig): Exclude<ProviderFamily, 'auto'> => {
   if (config.providerFamily === 'qwen' || config.providerFamily === 'generic') return config.providerFamily;
   return detectProviderFamilyFromModelId(config.model);
@@ -162,6 +215,7 @@ export const getModelProfile = (modelId: string): ModelProfile => {
 };
 
 interface ModelDiscoveryOptions {
+  apiProvider?: ApiProvider;
   modelLookupMode?: ModelLookupMode;
   modelLookupTtlHours?: number;
 }
@@ -227,23 +281,29 @@ export const fetchAvailableModels = async (
   apiUrl: string,
   options?: ModelDiscoveryOptions
 ): Promise<string[]> => {
-  let modelsUrl = apiUrl;
-  if (apiUrl.includes('/chat/completions')) modelsUrl = apiUrl.replace('/chat/completions', '/models');
-  else if (apiUrl.includes('/v1')) modelsUrl = apiUrl.endsWith('/') ? `${apiUrl}models` : `${apiUrl}/models`;
-  else modelsUrl = apiUrl.endsWith('/') ? `${apiUrl}v1/models` : `${apiUrl}/v1/models`;
+  const apiProvider = options?.apiProvider ?? inferApiProviderFromEndpoint(apiUrl);
+  const modelsUrl = resolveModelsEndpoint(apiUrl, apiProvider);
 
   try {
     const response = await fetch(modelsUrl);
     if (!response.ok) throw new Error(`HTTP Error: ${response.status} ${response.statusText}`);
     const data = await response.json();
-    if (data.data && Array.isArray(data.data)) {
+    const modelList = apiProvider === 'ollama'
+      ? (Array.isArray(data?.models) ? data.models : [])
+      : (Array.isArray(data?.data) ? data.data : []);
+
+    if (modelList.length > 0) {
       const ids: string[] = [];
       const lookupMode = options?.modelLookupMode ?? 'hf-cache';
       const lookupTtlHours = options?.modelLookupTtlHours ?? 168;
       const lookupTasks: Array<Promise<void>> = [];
 
-      for (const m of data.data) {
-        const id = String(m?.id || '').trim();
+      for (const m of modelList) {
+        const id = String(
+          apiProvider === 'ollama'
+            ? (m?.name || m?.model || '')
+            : (m?.id || '')
+        ).trim();
         if (!id) continue;
         ids.push(id);
 
@@ -842,6 +902,110 @@ const applyPatches = (
     return { content: newContent, success: true, reason: "", opsCount: dedupedOps.length, appliedOps };
 };
 
+const stripTrailingComment = (line: string): string => line.replace(/\s*\/\/.*$/, '').trim();
+
+const extractConstName = (line: string): string | null => {
+  const m = line.trim().match(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/);
+  return m ? m[1] : null;
+};
+
+const applyLineEditRescueToContent = (base: string, ops: InlineOp[]): { content: string; appliedOps: number } => {
+  let content = base;
+  let appliedOps = 0;
+
+  for (const op of ops) {
+    const findLines = normalizeText(op.find).split('\n').map(l => l.trim()).filter(Boolean);
+    const withLines = normalizeText(op.with).split('\n').map(l => l.trim()).filter(Boolean);
+    if (findLines.length === 0 || withLines.length === 0 || findLines.length !== withLines.length || findLines.length > 8) continue;
+
+    const sourceLines = content.split('\n');
+    const findConstNames = findLines.map(extractConstName);
+    const withConstNames = withLines.map(extractConstName);
+    const hasConstPattern = findConstNames.every(Boolean) && withConstNames.every(Boolean);
+
+    let nextContent = content;
+    let opApplied = 0;
+
+    if (hasConstPattern && findConstNames.join('|') === withConstNames.join('|')) {
+      const names = findConstNames as string[];
+      const candidateStarts: number[] = [];
+      for (let i = 0; i <= sourceLines.length - names.length; i += 1) {
+        let ok = true;
+        for (let j = 0; j < names.length; j += 1) {
+          const lineName = extractConstName(sourceLines[i + j]);
+          if (lineName !== names[j]) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) candidateStarts.push(i);
+      }
+      if (candidateStarts.length === 1) {
+        const start = candidateStarts[0];
+        const nextLines = [...sourceLines];
+        for (let j = 0; j < withLines.length; j += 1) {
+          const indent = (sourceLines[start + j].match(/^\s*/) || [''])[0];
+          const replacement = `${indent}${withLines[j].trimStart()}`;
+          if (nextLines[start + j] !== replacement) {
+            nextLines[start + j] = replacement;
+            opApplied += 1;
+          }
+        }
+        if (opApplied > 0) nextContent = nextLines.join('\n');
+      }
+    }
+
+    if (opApplied === 0 && findLines.length === 1 && withLines.length === 1) {
+      const target = stripTrailingComment(findLines[0]);
+      const hits: number[] = [];
+      for (let i = 0; i < sourceLines.length; i += 1) {
+        if (stripTrailingComment(sourceLines[i]) === target) hits.push(i);
+      }
+      if (hits.length === 1) {
+        const idx = hits[0];
+        const indent = (sourceLines[idx].match(/^\s*/) || [''])[0];
+        const replacement = `${indent}${withLines[0].trimStart()}`;
+        if (sourceLines[idx] !== replacement) {
+          const nextLines = [...sourceLines];
+          nextLines[idx] = replacement;
+          nextContent = nextLines.join('\n');
+          opApplied = 1;
+        }
+      }
+    }
+
+    if (opApplied > 0 && nextContent !== content) {
+      content = nextContent;
+      appliedOps += opApplied;
+    }
+  }
+
+  return { content, appliedOps };
+};
+
+const tryLineEditRescueAcrossFiles = (
+  files: ProjectFiles,
+  ops: InlineOp[]
+): { applied: boolean; file?: string; content?: string; appliedOps?: number; ambiguous?: boolean } => {
+  if (ops.length === 0) return { applied: false };
+
+  const candidates: Array<{ file: string; content: string; appliedOps: number }> = [];
+  for (const [file, base] of Object.entries(files)) {
+    if (!/\.(tsx?|jsx?)$/i.test(file)) continue;
+    const result = applyLineEditRescueToContent(String(base || ''), ops);
+    if (result.appliedOps > 0 && result.content !== base) {
+      candidates.push({ file, content: result.content, appliedOps: result.appliedOps });
+    }
+  }
+
+  if (candidates.length === 0) return { applied: false };
+  candidates.sort((a, b) => b.appliedOps - a.appliedOps || a.file.localeCompare(b.file));
+  const topScore = candidates[0].appliedOps;
+  const top = candidates.filter(c => c.appliedOps === topScore);
+  if (top.length > 1) return { applied: false, ambiguous: true };
+  return { applied: true, file: top[0].file, content: top[0].content, appliedOps: top[0].appliedOps };
+};
+
 const computeParserConfidence = (params: {
   markerCount: number;
   appliedOps: number;
@@ -875,7 +1039,8 @@ const parseResponse = (
     applyToFiles: boolean,
     rawModelText: string,
     rawWireText: string,
-    parseMode: ParseMode
+    parseMode: ParseMode,
+    context: { isIterationMode: boolean; modelTier: ModelTier }
 ): StreamUpdate => {
   const newFiles = { ...baseFiles };
   const failedPatches: string[] = [];
@@ -887,6 +1052,8 @@ const parseResponse = (
   const parsedParts: string[] = [];
   let parserStage: ParserStage = 'raw';
   let usedFallback = false;
+  let lineEditRescueApplied = false;
+  let lineEditRescueTarget = '';
   const setFileIfChanged = (fileKey: string, nextContent: string): boolean => {
     const prevContent = newFiles[fileKey] ?? '';
     if (prevContent === nextContent) return false;
@@ -925,6 +1092,8 @@ const parseResponse = (
       droppedDebugChars: 0,
       repairHints: [],
       parserConfidence: 0.5,
+      lineEditRescueApplied: false,
+      lineEditRescueTarget: '',
       partialText: textClean,
       rawSse: rawModelText || normalizedText,
       deltaRaw: '',
@@ -1232,6 +1401,35 @@ const parseResponse = (
         }
       }
     }
+
+    const shouldTryLineEditRescue =
+      isFinal &&
+      applyToFiles &&
+      context.isIterationMode &&
+      (context.modelTier === 'small' || context.modelTier === 'unknown') &&
+      appliedOpsTotal === 0 &&
+      hasAnyPatchTags;
+    if (shouldTryLineEditRescue) {
+      const inlineOps = dedupeInlineOps(extractInlineReplaceOps(textClean));
+      if (inlineOps.length > 0) {
+        const rescue = tryLineEditRescueAcrossFiles(newFiles, inlineOps);
+        if (rescue.applied && rescue.file && rescue.content) {
+          if (setFileIfChanged(rescue.file, rescue.content)) {
+            lineEditRescueApplied = true;
+            lineEditRescueTarget = rescue.file;
+            inlinePatchApplied = true;
+            usedFallback = true;
+            parserStage = 'fallback';
+            appliedOpsTotal += rescue.appliedOps || 1;
+            warnings.push(`AUTO_RECOVER: Applied line-edit rescue to ${rescue.file} for iteration micro-edit.`);
+            repairHints.push('line_edit_rescue_applied');
+          }
+        } else if (rescue.ambiguous) {
+          repairHints.push('ambiguous_target');
+          warnings.push('AUTO_RECOVER: Skipped line-edit rescue due to ambiguous file target.');
+        }
+      }
+    }
   }
 
   if (usedFallback && parserStage !== 'markers') parserStage = 'fallback';
@@ -1288,6 +1486,8 @@ const parseResponse = (
     droppedDebugChars: 0,
     repairHints: Array.from(new Set(repairHints)),
     parserConfidence,
+    lineEditRescueApplied,
+    lineEditRescueTarget,
     partialText: textClean, 
     rawSse: rawModelText || normalizedText, 
     deltaRaw: "", 
@@ -1316,7 +1516,7 @@ export const generateAppCode = async (
   currentFiles: ProjectFiles,
   onStreamUpdate: (update: StreamUpdate) => void,
   retryAttempt: number = 0,
-  attemptMeta?: { attemptIndex?: number; attemptType?: 'primary' | 'retry' | 'repair' }
+  attemptMeta?: { attemptIndex?: number; attemptType?: 'primary' | 'retry' | 'repair'; isIteration?: boolean }
 ): Promise<StreamUpdate> => {
   const protocolFiles: ProjectFiles = {};
   const assetFileNames: string[] = [];
@@ -1330,6 +1530,18 @@ export const generateAppCode = async (
   });
   
   const baseFiles: ProjectFiles = { ...protocolFiles };
+  const modelProfile = applyTierPreference(getModelProfile(config.model), config.modelTierPreference);
+  const apiProvider = getEffectiveApiProvider(config);
+  const requestUrl = resolveChatEndpoint(config.apiUrl, apiProvider);
+  const transportWarnings: string[] = [];
+  if (
+    apiProvider === 'ollama' &&
+    /\/v1\/chat\/completions/i.test(String(config.apiUrl || '')) &&
+    requestUrl !== config.apiUrl
+  ) {
+    transportWarnings.push(`AUTO_FIX: Ollama endpoint normalized from ${config.apiUrl} to ${requestUrl}.`);
+  }
+  const isIterationMode = Boolean(attemptMeta?.isIteration);
   let rawContent = "";
   let rawReasoning = "";
   let rawModelLog = "";
@@ -1357,7 +1569,11 @@ export const generateAppCode = async (
       applyToFiles,
       rawModelLog,
       rawWireLog,
-      parseMode
+      parseMode,
+      {
+        isIterationMode,
+        modelTier: modelProfile.tier
+      }
     );
 
     const rawText = rawModelLog;
@@ -1378,6 +1594,9 @@ export const generateAppCode = async (
     if (update.parserStats?.markerCount > 0) sawMarkers = true;
     onStreamUpdate({
       ...update,
+      warnings: transportWarnings.length > 0
+        ? Array.from(new Set([...(update.warnings || []), ...transportWarnings]))
+        : update.warnings,
       deltaRaw,
       deltaRawWire,
       deltaClean,
@@ -1448,8 +1667,13 @@ export const generateAppCode = async (
 - Never use CDN tags/scripts for dependencies.
 - For 3D, use local dependency import: \`import * as THREE from 'three'\`.
 - First non-whitespace token must start with an HTML marker block.`;
+  const iterationContract = isIterationMode
+    ? `[ITERATION FOCUS]
+- Prefer one focused patch block for App.tsx for micro-edits.
+- Avoid duplicate repeated patch blocks.
+- Keep changes minimal and targeted to the request.`
+    : '';
 
-  const modelProfile = applyTierPreference(getModelProfile(config.model), config.modelTierPreference);
   const providerFamily = getEffectiveProviderFamily(config);
   if (modelProfile.tier === 'unknown' && (!config.modelTierPreference || config.modelTierPreference === 'auto')) {
     throw new Error('Unknown model size. Choose small-model or large-model mode in settings before running generation.');
@@ -1459,24 +1683,41 @@ export const generateAppCode = async (
     ? `\n\n[ASSETS]\n${assetFileNames.sort().map((name) => `- ${name}`).join('\n')}\n- Prefer importing assets from these paths (e.g. import hero from './assets/hero.png').`
     : '';
   const fileContext = `[PROJECT MAP]\n${buildProjectMapWithHints(protocolFiles)}${assetSection}\n\n[FILE CONTENTS]\n${buildFileContext(protocolFiles, prompt)}`;
-  const userContent = `${strictContract}\n\n${fileContext}\n\n[USER REQUEST]\n${prompt}`;
+  const userContent = `${strictContract}${iterationContract ? `\n\n${iterationContract}` : ''}\n\n${fileContext}\n\n[USER REQUEST]\n${prompt}`;
   const messages = [{ role: 'system', content: `${config.systemPrompt}\n\n${adaptiveAddendum}` }, ...optimizeHistory(history), { role: 'user', content: userContent }];
 
   try {
-    const requestBody: any = {
-      model: config.model,
-      messages,
-      stream: true
-    };
-
-    // Intentionally omit tools/tool_choice when no tool use is expected.
-    if (providerFamily === 'qwen') {
-      // Keep payload minimal; Qwen performs best without forced stop/tool scaffolding.
-    }
+    const requestBody: any = apiProvider === 'ollama'
+      ? {
+          model: config.model,
+          messages,
+          stream: true,
+          options: {
+            num_ctx: clamp(
+              Number(config.ollamaContextSize ?? DEFAULT_OLLAMA_CONTEXT_SIZE),
+              512,
+              262144
+            )
+          }
+        }
+      : {
+          model: config.model,
+          messages,
+          stream: true
+        };
 
     // Never force sampling knobs unless user explicitly enables override.
     if (config.samplingOverrideEnabled) {
-      if (config.samplingProfile === 'strict-deterministic') {
+      if (apiProvider === 'ollama') {
+        if (config.samplingProfile === 'strict-deterministic') {
+          requestBody.options.temperature = 0.2;
+          requestBody.options.top_p = 0.9;
+        } else if (providerFamily === 'qwen') {
+          requestBody.options.temperature = 1.0;
+          requestBody.options.top_p = 0.95;
+          requestBody.options.top_k = 40;
+        }
+      } else if (config.samplingProfile === 'strict-deterministic') {
         requestBody.temperature = 0.2;
         requestBody.top_p = 0.9;
       } else if (providerFamily === 'qwen') {
@@ -1486,7 +1727,7 @@ export const generateAppCode = async (
       }
     }
 
-    const response = await fetch(config.apiUrl, {
+    const response = await fetch(requestUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(requestBody),
@@ -1497,62 +1738,113 @@ export const generateAppCode = async (
     const decoder = new TextDecoder("utf-8");
 
     if (!reader) {
-       const data = await response.json();
-       const rr = data.choices?.[0]?.message?.reasoning_content || "";
-       const rc = data.choices?.[0]?.message?.content || "";
-       rawContent = rc;
-       rawReasoning = rr;
-       rawModelLog = `${rc || ""}`;
-       const result = emitUpdate(true, true, 'final-full');
-       return result;
-    } 
+      const data = await response.json();
+      if (apiProvider === 'ollama') {
+        const rc = data?.message?.content || "";
+        rawContent = rc;
+        rawModelLog = `${rc || ""}`;
+      } else {
+        const rr = data.choices?.[0]?.message?.reasoning_content || "";
+        const rc = data.choices?.[0]?.message?.content || "";
+        rawContent = rc;
+        rawReasoning = rr;
+        rawModelLog = `${rc || ""}`;
+      }
+      const result = emitUpdate(true, true, 'final-full');
+      return result;
+    }
 
-    const processEvents = (text: string) => {
+    if (apiProvider === 'ollama') {
+      const processOllamaLines = (text: string) => {
+        const lines = text.split('\n');
+        const leftovers = lines.pop() || '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          if (config.showWireDebug) rawWireLog += `${trimmed}\n`;
+          try {
+            const parsed = JSON.parse(trimmed);
+            const content = parsed?.message?.content;
+            if (typeof content === 'string' && content.length > 0) {
+              handleDelta({ content });
+            }
+            if (parsed?.done === true) {
+              shouldStop = true;
+            }
+          } catch {
+            // ignore malformed NDJSON chunks
+          }
+        }
+        return leftovers;
+      };
+
+      while (!shouldStop) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        buffer = buffer.replace(/\r\n/g, "\n");
+        buffer = processOllamaLines(buffer);
+      }
+
+      if (buffer.trim()) processOllamaLines(`${buffer}\n`);
+    } else {
+      const processEvents = (text: string) => {
         const events = text.split("\n\n");
         const leftovers = events.pop() || "";
         for (const evt of events) {
-            const lines = evt.split("\n");
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (trimmed.startsWith("data:")) {
-                    if (config.showWireDebug) {
-                      rawWireLog += `${trimmed}\n`;
-                    }
-                    const payload = trimmed.slice(5).trim();
-                    if (payload === "[DONE]") { shouldStop = true; continue; }
-                    try {
-                        const parsed = JSON.parse(payload);
-                        const delta = parsed.choices?.[0]?.delta;
-                        if (delta) handleDelta(delta);
-                        else {
-                            const full = parsed.choices?.[0]?.message?.content;
-                            if (typeof full === "string") handleDelta({ content: full });
-                        }
-                    } catch (e) {}
+          const lines = evt.split("\n");
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith("data:")) {
+              if (config.showWireDebug) {
+                rawWireLog += `${trimmed}\n`;
+              }
+              const payload = trimmed.slice(5).trim();
+              if (payload === "[DONE]") { shouldStop = true; continue; }
+              try {
+                const parsed = JSON.parse(payload);
+                const delta = parsed.choices?.[0]?.delta;
+                if (delta) handleDelta(delta);
+                else {
+                  const full = parsed.choices?.[0]?.message?.content;
+                  if (typeof full === "string") handleDelta({ content: full });
                 }
+              } catch {
+                // ignore malformed stream event
+              }
             }
+          }
         }
         return leftovers;
-    };
+      };
 
-    while (!shouldStop) {
+      while (!shouldStop) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         buffer = buffer.replace(/\r\n/g, "\n");
         buffer = processEvents(buffer);
+      }
+
+      if (buffer.trim()) processEvents(buffer + "\n\n");
     }
 
-    if (buffer.trim()) processEvents(buffer + "\n\n");
     try { await reader.cancel(); } catch {}
 
     const badTokenPattern = /<\|im_start\|>|<\|im_end\|>/;
     const stripped = rawModelLog.replace(/<\|im_start\|>|<\|im_end\|>/g, '').trim();
     if (retryAttempt < INTERNAL_RETRY_LIMIT && badTokenPattern.test(rawModelLog) && stripped.length === 0) {
-      const retryUpdate = parseResponse(rawContent, rawReasoning, baseFiles, false, false, rawModelLog, rawWireLog, 'final-full');
+      const retryUpdate = parseResponse(rawContent, rawReasoning, baseFiles, false, false, rawModelLog, rawWireLog, 'final-full', {
+        isIterationMode,
+        modelTier: modelProfile.tier
+      });
       onStreamUpdate({
         ...retryUpdate,
-        warnings: [...(retryUpdate.warnings || []), "AUTO_RETRY: Special tokens detected; retrying once."],
+        warnings: [
+          ...(retryUpdate.warnings || []),
+          ...transportWarnings,
+          "AUTO_RETRY: Special tokens detected; retrying once."
+        ],
         deltaRaw: "",
         deltaRawWire: "",
         deltaClean: "",
@@ -1565,7 +1857,10 @@ export const generateAppCode = async (
     if (retryAttempt < INTERNAL_RETRY_LIMIT && !sawMarkers) {
       // Probe parseability using applyToFiles=true on cloned base files.
       // parseResponse clones internally, so this is safe and side-effect free.
-      const retryProbe = parseResponse(rawContent, rawReasoning, baseFiles, false, true, rawModelLog, rawWireLog, 'final-full');
+      const retryProbe = parseResponse(rawContent, rawReasoning, baseFiles, false, true, rawModelLog, rawWireLog, 'final-full', {
+        isIterationMode,
+        modelTier: modelProfile.tier
+      });
       const touchedCount = retryProbe.parserStats?.touchedFiles?.length || 0;
       const appliedOps = retryProbe.parserStats?.appliedOps || 0;
       const looksParseable = /(import\s+React|export\s+default|```|<replace>|<find>|<with>|<!--\s*(filename|patch):)/i.test(rawModelLog);
@@ -1575,7 +1870,11 @@ export const generateAppCode = async (
       if (hasToolWrappers && !hasActionablePatch) {
         onStreamUpdate({
           ...retryProbe,
-          warnings: [...(retryProbe.warnings || []), "AUTO_RETRY: Tool-call wrappers detected with no actionable edits; retrying once."],
+          warnings: [
+            ...(retryProbe.warnings || []),
+            ...transportWarnings,
+            "AUTO_RETRY: Tool-call wrappers detected with no actionable edits; retrying once."
+          ],
           deltaRaw: "",
           deltaRawWire: "",
           deltaClean: "",
@@ -1588,7 +1887,11 @@ export const generateAppCode = async (
       if (looksParseable && !hasActionablePatch) {
         onStreamUpdate({
           ...retryProbe,
-          warnings: [...(retryProbe.warnings || []), "AUTO_RETRY: Parseable content without actionable edits; retrying once."],
+          warnings: [
+            ...(retryProbe.warnings || []),
+            ...transportWarnings,
+            "AUTO_RETRY: Parseable content without actionable edits; retrying once."
+          ],
           deltaRaw: "",
           deltaRawWire: "",
           deltaClean: "",
