@@ -1,4 +1,7 @@
-export const DEFAULT_API_URL = 'http://localhost:1234/v1/chat/completions'; // LM Studio default
+export const DEFAULT_LM_STUDIO_API_URL = 'http://localhost:1234/v1/chat/completions';
+export const DEFAULT_OLLAMA_API_URL = 'http://localhost:11434/api/chat';
+export const DEFAULT_OLLAMA_CONTEXT_SIZE = 32000;
+export const DEFAULT_API_URL = DEFAULT_LM_STUDIO_API_URL; // Backward-compatible alias
 export const DEFAULT_MODEL = 'local-model'; // Placeholder
 
 // --- SYSTEM PROMPT (LOCAL LLM OPTIMIZED) ---
