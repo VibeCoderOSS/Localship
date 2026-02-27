@@ -9,6 +9,8 @@ interface PreviewFrameProps {
   isLoading: boolean;
   devMode: boolean; 
   lastGoodFallbackEnabled: boolean;
+  isPaused: boolean;
+  restartNonce: number;
   onTestReport?: (report: any) => void;
   onPreviewStatus?: (status: PreviewStatus) => void;
 }
@@ -45,6 +47,8 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
   isLoading,
   devMode,
   lastGoodFallbackEnabled,
+  isPaused,
+  restartNonce,
   onTestReport,
   onPreviewStatus
 }) => {
@@ -70,11 +74,22 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
   const onTestReportRef = useRef(onTestReport);
   const currentPreflightWarningsRef = useRef<string[]>([]);
   const currentAutoHealedRef = useRef<string[]>([]);
+  const pausedDirtyRef = useRef(false);
+  const lastBuiltSignatureRef = useRef('');
+  const lastRestartNonceRef = useRef(restartNonce);
 
   useEffect(() => {
     onPreviewStatusRef.current = onPreviewStatus;
     onTestReportRef.current = onTestReport;
   }, [onPreviewStatus, onTestReport]);
+
+  const emitPreviewStatus = (status: PreviewStatus) => {
+    onPreviewStatusRef.current?.({
+      ...status,
+      paused: isPaused,
+      dirtyWhilePaused: isPaused ? pausedDirtyRef.current : false
+    });
+  };
 
   const enqueueBundleForCleanup = (bundle: UrlBundle | null) => {
     if (!bundle) return;
@@ -177,7 +192,7 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
         console.error("Vendor load failed", e); 
         const msg = 'Critical: System assets failed to load.';
         setPreviewBanner({ severity: 'error', stage: 'compile', message: msg, details: [msg] });
-        onPreviewStatusRef.current?.({ candidateOk: false, usedLastGood: false, errors: [msg], stage: 'compile' });
+        emitPreviewStatus({ candidateOk: false, usedLastGood: false, errors: [msg], stage: 'compile' });
       }
     };
     loadVendors();
@@ -243,7 +258,7 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
               }
               pendingPreviousBundleRef.current = null;
               flushStaleBundles();
-              onPreviewStatusRef.current?.({
+              emitPreviewStatus({
                 candidateOk: true,
                 usedLastGood: false,
                 errors: [],
@@ -270,7 +285,7 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
                 setPreviewUrl(fallbackBundle.htmlUrl);
                 pendingPreviousBundleRef.current = null;
                 flushStaleBundles();
-                onPreviewStatusRef.current?.({
+                emitPreviewStatus({
                   candidateOk: false,
                   usedLastGood: true,
                   errors: mergedErrors,
@@ -280,7 +295,7 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
                 });
               } else {
                 pendingPreviousBundleRef.current = null;
-                onPreviewStatusRef.current?.({
+                emitPreviewStatus({
                   candidateOk: false,
                   usedLastGood: false,
                   errors: mergedErrors,
@@ -327,7 +342,7 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
                 setPreviewUrl(fallbackBundle.htmlUrl);
                 pendingPreviousBundleRef.current = null;
                 flushStaleBundles();
-                onPreviewStatusRef.current?.({
+                emitPreviewStatus({
                   candidateOk: false,
                   usedLastGood: true,
                   errors: currentRunErrorsRef.current,
@@ -337,7 +352,7 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
                 });
               } else {
                 pendingPreviousBundleRef.current = null;
-                onPreviewStatusRef.current?.({
+                emitPreviewStatus({
                   candidateOk: false,
                   usedLastGood: false,
                   errors: currentRunErrorsRef.current,
@@ -353,12 +368,43 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [lastGoodFallbackEnabled]);
+  }, [lastGoodFallbackEnabled, isPaused]);
 
   useEffect(() => {
-    if (isLoading || !vendorMap) return;
+    if (!vendorMap) return;
+
+    const signature = Object.entries(files)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, content]) => {
+        const text = String(content || '');
+        return `${name}:${text.length}:${text.slice(0, 8)}:${text.slice(-8)}`;
+      })
+      .join('|') + `|css:${compiledCss.length}|vendor:${Object.keys(vendorMap.imports || {}).length}`;
+
+    const forcedRestart = restartNonce !== lastRestartNonceRef.current;
+    if (forcedRestart) {
+      lastRestartNonceRef.current = restartNonce;
+    }
+
+    if (isPaused && !forcedRestart) {
+      if (signature !== lastBuiltSignatureRef.current) {
+        pausedDirtyRef.current = true;
+      }
+      emitPreviewStatus({
+        candidateOk: !!(activeBundleRef.current || lastGoodBundleRef.current),
+        usedLastGood: !!lastGoodBundleRef.current,
+        errors: [],
+        stage: 'preflight',
+        warnings: pausedDirtyRef.current ? ['Preview paused. Changes are pending.'] : ['Preview paused.']
+      });
+      return;
+    }
+
+    if (isLoading) return;
     
     const updatePreview = async () => {
+      pausedDirtyRef.current = false;
+      lastBuiltSignatureRef.current = signature;
       setPreviewBanner(null);
       setShowBannerDetails(false);
       const preflight = runPreviewPreflight(files);
@@ -379,7 +425,7 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
           activeBundleRef.current = fallbackBundle;
           setPreviewUrl(fallbackBundle.htmlUrl);
           setPendingPreviewUrl(null);
-          onPreviewStatusRef.current?.({
+          emitPreviewStatus({
             candidateOk: false,
             usedLastGood: true,
             errors: fatalErrors,
@@ -388,7 +434,7 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
             autoHealed: preflight.autoHealed
           });
         } else {
-          onPreviewStatusRef.current?.({
+          emitPreviewStatus({
             candidateOk: false,
             usedLastGood: false,
             errors: fatalErrors,
@@ -454,9 +500,9 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
           activeBundleRef.current = fallbackBundle;
           setPreviewUrl(fallbackBundle.htmlUrl);
           setPendingPreviewUrl(null);
-          onPreviewStatusRef.current?.({ candidateOk: false, usedLastGood: true, errors: [msg], stage: 'compile' });
+          emitPreviewStatus({ candidateOk: false, usedLastGood: true, errors: [msg], stage: 'compile' });
         } else {
-          onPreviewStatusRef.current?.({ candidateOk: false, usedLastGood: false, errors: [msg], stage: 'compile' });
+          emitPreviewStatus({ candidateOk: false, usedLastGood: false, errors: [msg], stage: 'compile' });
         }
         return;
       }
@@ -484,10 +530,10 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
           pendingPreviousBundleRef.current = null;
           flushStaleBundles();
           setPreviewBanner({ severity: 'warning', stage: 'compile', message: msg, details: [msg] });
-          onPreviewStatusRef.current?.({ candidateOk: false, usedLastGood: true, errors: [msg], stage: 'compile' });
+          emitPreviewStatus({ candidateOk: false, usedLastGood: true, errors: [msg], stage: 'compile' });
         } else {
           setPreviewBanner({ severity: 'error', stage: 'compile', message: msg, details: [msg] });
-          onPreviewStatusRef.current?.({ candidateOk: false, usedLastGood: false, errors: [msg], stage: 'compile' });
+          emitPreviewStatus({ candidateOk: false, usedLastGood: false, errors: [msg], stage: 'compile' });
         }
         return;
       }
@@ -714,7 +760,7 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
       pendingPreviousBundleRef.current = activeBundleRef.current;
       stagedBundleRef.current = { id: runId, htmlUrl: candidateUrl, urls: runUrls };
       setPendingPreviewUrl(candidateUrl);
-      onPreviewStatusRef.current?.({
+      emitPreviewStatus({
         candidateOk: false,
         usedLastGood: false,
         errors: [],
@@ -727,6 +773,13 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
     if (rebuildTimerRef.current) {
       window.clearTimeout(rebuildTimerRef.current);
     }
+    if (forcedRestart) {
+      if (stagedBundleRef.current) {
+        enqueueBundleForCleanup(stagedBundleRef.current);
+        stagedBundleRef.current = null;
+      }
+      setPendingPreviewUrl(null);
+    }
     rebuildTimerRef.current = window.setTimeout(() => {
       updatePreview();
     }, 120);
@@ -736,7 +789,7 @@ const PreviewFrame: React.FC<PreviewFrameProps> = ({
         window.clearTimeout(rebuildTimerRef.current);
       }
     };
-  }, [files, isLoading, vendorMap, compiledCss]);
+  }, [files, isLoading, vendorMap, compiledCss, isPaused, restartNonce, lastGoodFallbackEnabled]);
 
   return (
     <div className="w-full h-full bg-white flex flex-col relative overflow-hidden select-none">
