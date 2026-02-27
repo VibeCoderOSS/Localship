@@ -18,6 +18,7 @@ export const useModelOptions = ({ localConfig, setLocalConfig }: UseModelOptions
     setFetchError(null);
     try {
       const models = await fetchAvailableModels(cfg.apiUrl, {
+        apiProvider: cfg.apiProvider ?? 'lmstudio',
         modelLookupMode: cfg.modelLookupMode ?? 'hf-cache',
         modelLookupTtlHours: cfg.modelLookupTtlHours ?? 168
       });
