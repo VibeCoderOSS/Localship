@@ -14,7 +14,7 @@ export const SETTINGS_SECTIONS: SectionSpec[] = [
     tab: 'basics',
     title: 'Core Settings',
     description: 'Connection, model, and high-level behavior.',
-    fields: ['apiUrl', 'model', 'uiMode', 'qualityMode']
+    fields: ['apiProvider', 'apiUrl', 'model', 'ollamaContextSize', 'uiMode', 'qualityMode']
   },
   {
     tab: 'model',
@@ -43,6 +43,13 @@ export const SETTINGS_SECTIONS: SectionSpec[] = [
 ];
 
 export const SETTINGS_FIELDS: Partial<Record<SettingsFieldKey, FieldSpec>> = {
+  apiProvider: {
+    key: 'apiProvider',
+    tab: 'basics',
+    controlType: 'provider-cards',
+    label: 'API Provider',
+    help: 'Choose which local server to use for generation and model discovery.'
+  },
   apiUrl: {
     key: 'apiUrl',
     tab: 'basics',
@@ -50,6 +57,17 @@ export const SETTINGS_FIELDS: Partial<Record<SettingsFieldKey, FieldSpec>> = {
     label: 'API Endpoint',
     help: 'OpenAI-compatible endpoint, e.g. LM Studio local server.',
     placeholder: 'http://localhost:1234/v1/chat/completions'
+  },
+  ollamaContextSize: {
+    key: 'ollamaContextSize',
+    tab: 'basics',
+    controlType: 'number',
+    label: 'Ollama Context Size (num_ctx)',
+    help: 'Default context window sent to Ollama via options.num_ctx.',
+    min: 512,
+    max: 262144,
+    step: 256,
+    visibleIf: (config: AppConfig) => (config.apiProvider ?? 'lmstudio') === 'ollama'
   },
   model: {
     key: 'model',
