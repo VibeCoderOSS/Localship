@@ -9,6 +9,7 @@ export type ModelTierPreference = 'auto' | 'small' | 'large';
 export type PreviewFailureMode = 'last-good' | 'strict-fail';
 export type ParserStage = 'raw' | 'normalized' | 'markers' | 'fallback';
 export type ProviderFamily = 'auto' | 'qwen' | 'generic';
+export type ApiProvider = 'lmstudio' | 'ollama';
 export type SamplingProfile = 'provider-default' | 'strict-deterministic';
 export type ModelLookupMode = 'off' | 'hf-cache' | 'hf-live';
 export type ModelProfileSource = 'metadata' | 'name' | 'manual' | 'unknown' | 'hf';
@@ -18,6 +19,7 @@ export type ParseMode = 'stream-lite' | 'final-full';
 
 export interface AppConfig {
   apiUrl: string;
+  apiProvider?: ApiProvider;
   model: string;
   systemPrompt: string;
   modelTierPreference?: ModelTierPreference;
@@ -33,6 +35,7 @@ export interface AppConfig {
   enableLiveWorkspaceApply?: boolean;
   debugTextBudgetChars?: number;
   streamParseCadenceMs?: number;
+  ollamaContextSize?: number;
   showAdvancedDebug?: boolean;
   showWireDebug?: boolean;
   outputDir?: string; 
@@ -95,6 +98,8 @@ export interface PreviewStatus {
   stage?: 'preflight' | 'compile' | 'mount' | 'smoke';
   warnings?: string[];
   autoHealed?: string[];
+  paused?: boolean;
+  dirtyWhilePaused?: boolean;
 }
 
 export interface ParserStats {
@@ -146,6 +151,8 @@ export interface StreamUpdate {
   attemptType?: 'primary' | 'retry' | 'repair';
   decisionReason?: string;
   hasRealDiff?: boolean;
+  lineEditRescueApplied?: boolean;
+  lineEditRescueTarget?: string;
   parseMode?: ParseMode;
   droppedDebugChars?: number;
   parserConfidence?: number;
