@@ -322,11 +322,12 @@ const JUMP_STRENGTH = -6.2;
   assert(r5.files['App.tsx'].includes('const GRAVITY = 0.28;'), 'marker failure + inline rescue: gravity not updated');
 };
 
-const shouldTriggerSecondAttempt = ({ qualityMode, attemptIndex, isRepairCall, hasHardIssues, hasRuntimeIssues, noEffectiveChanges, inlineNoOp }) => {
+const shouldTriggerSecondAttempt = ({ qualityMode, attemptIndex, isRepairCall, isIteration, hasHardIssues, hasRuntimeIssues, noEffectiveChanges, inlineNoOp }) => {
   if (isRepairCall) return false;
   if (attemptIndex >= 2) return false;
   if (qualityMode === 'single-pass') return false;
   if (qualityMode === 'always-best-of-2') return true;
+  if (isIteration && attemptIndex === 1 && noEffectiveChanges) return true;
   return hasHardIssues || hasRuntimeIssues || noEffectiveChanges || inlineNoOp;
 };
 
@@ -335,6 +336,7 @@ const orchestratorFixtures = () => {
     qualityMode: 'adaptive-best-of-2',
     attemptIndex: 1,
     isRepairCall: false,
+    isIteration: false,
     hasHardIssues: true,
     hasRuntimeIssues: false,
     noEffectiveChanges: false,
@@ -346,6 +348,7 @@ const orchestratorFixtures = () => {
     qualityMode: 'adaptive-best-of-2',
     attemptIndex: 1,
     isRepairCall: false,
+    isIteration: false,
     hasHardIssues: false,
     hasRuntimeIssues: false,
     noEffectiveChanges: false,
@@ -357,12 +360,25 @@ const orchestratorFixtures = () => {
     qualityMode: 'always-best-of-2',
     attemptIndex: 1,
     isRepairCall: false,
+    isIteration: false,
     hasHardIssues: false,
     hasRuntimeIssues: false,
     noEffectiveChanges: false,
     inlineNoOp: false
   });
   assert(c === true, 'orchestrator: always-best-of-2 should always run second attempt');
+
+  const d = shouldTriggerSecondAttempt({
+    qualityMode: 'adaptive-best-of-2',
+    attemptIndex: 1,
+    isRepairCall: false,
+    isIteration: true,
+    hasHardIssues: false,
+    hasRuntimeIssues: false,
+    noEffectiveChanges: true,
+    inlineNoOp: false
+  });
+  assert(d === true, 'orchestrator: iteration no-diff should force retry');
 };
 
 const runPreviewPreflightCompat = (files) => {
