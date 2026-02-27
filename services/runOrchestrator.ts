@@ -3,6 +3,7 @@ import { QualityMode, RunCandidateScore } from '../types';
 export interface RetryDecisionInput {
   qualityMode: QualityMode;
   isRepairCall: boolean;
+  isIteration: boolean;
   attemptIndex: number;
   hasHardIssues: boolean;
   hasRuntimeIssues: boolean;
@@ -24,6 +25,9 @@ export interface RetryPromptInput {
   parserHints: string[];
   noEffectiveChanges: boolean;
   inlineNoOp: boolean;
+  candidateFile?: string;
+  findSnippet?: string;
+  fileExcerpt?: string;
 }
 
 export interface RankedCandidate<T = string> {
@@ -35,6 +39,7 @@ export const shouldTriggerSecondAttempt = (input: RetryDecisionInput): RetryDeci
   const {
     qualityMode,
     isRepairCall,
+    isIteration,
     attemptIndex,
     hasHardIssues,
     hasRuntimeIssues,
@@ -51,6 +56,10 @@ export const shouldTriggerSecondAttempt = (input: RetryDecisionInput): RetryDeci
 
   if (qualityMode === 'always-best-of-2') {
     return { shouldRetry: true, reason: 'quality_mode_always_best_of_2' };
+  }
+
+  if (isIteration && attemptIndex === 1 && noEffectiveChanges) {
+    return { shouldRetry: true, reason: 'iteration_no_diff_forced_retry' };
   }
 
   const hasRetrySignals = hasHardIssues || hasRuntimeIssues || noEffectiveChanges || inlineNoOp;
@@ -84,6 +93,13 @@ export const buildSecondAttemptPrompt = (input: RetryPromptInput): string => {
   }
   if (input.inlineNoOp) {
     parts.push('[INLINE_ANCHOR_MISS]\nAnchors did not match exactly. Use precise current snippets.');
+  }
+  if (input.candidateFile || input.findSnippet || input.fileExcerpt) {
+    const ctx: string[] = [];
+    if (input.candidateFile) ctx.push(`candidate_file=${input.candidateFile}`);
+    if (input.findSnippet) ctx.push(`find_snippet:\n${input.findSnippet}`);
+    if (input.fileExcerpt) ctx.push(`file_excerpt:\n${input.fileExcerpt}`);
+    parts.push(`[INLINE_ANCHOR_CONTEXT]\n${ctx.join('\n')}`);
   }
 
   parts.push('STRICT OUTPUT');
