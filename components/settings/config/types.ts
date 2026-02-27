@@ -15,7 +15,8 @@ export type SettingsControlType =
   | 'readonly'
   | 'model'
   | 'tier-override'
-  | 'folder-picker';
+  | 'folder-picker'
+  | 'provider-cards';
 
 export interface SettingsIssue {
   severity: 'error' | 'warning';
