@@ -1,8 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Message, AppConfig, ChatState, ProjectDetails, ProjectFiles, PreviewStatus, SimpleComposerDraft, SimpleComposerPayload } from './types';
+import { Message, AppConfig, ChatState, ProjectDetails, ProjectFiles, PreviewStatus, SimpleComposerDraft, SimpleComposerPayload, ApiProvider } from './types';
 import { generateAppCode } from './services/llmService';
 import { exportProject, buildProjectLocally } from './utils/exportService';
-import { DEFAULT_API_URL, DEFAULT_MODEL, SYSTEM_PROMPT } from './constants';
+import {
+  DEFAULT_API_URL,
+  DEFAULT_MODEL,
+  DEFAULT_OLLAMA_API_URL,
+  DEFAULT_OLLAMA_CONTEXT_SIZE,
+  SYSTEM_PROMPT
+} from './constants';
 import { runPreviewPreflight, validateProject } from './utils/projectUtils';
 import PreviewFrame from './components/PreviewFrame';
 import ConfigModal from './components/ConfigModal';
@@ -243,6 +249,20 @@ const appendWithCap = (current: string, delta: string, cap: number): { next: str
   return { next: combined.slice(dropped), dropped };
 };
 
+const clampNumber = (value: unknown, fallback: number, min: number, max: number): number => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+};
+
+const inferApiProviderFromUrl = (apiUrl?: string): ApiProvider => {
+  const lower = String(apiUrl || '').toLowerCase();
+  if (lower.includes(':11434') || lower.includes('/api/chat') || lower.includes('/api/tags')) {
+    return 'ollama';
+  }
+  return 'lmstudio';
+};
+
 const extractInlineFindSnippet = (text: string): string => {
   const match = /<find>([\s\S]*?)<\/find>/i.exec(text || '');
   return match ? match[1].trim() : '';
@@ -315,6 +335,7 @@ const App: React.FC = () => {
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [config, setConfig] = useState<AppConfig>({
     apiUrl: DEFAULT_API_URL,
+    apiProvider: 'lmstudio',
     model: DEFAULT_MODEL,
     systemPrompt: SYSTEM_PROMPT, 
     modelTierPreference: 'auto',
@@ -330,6 +351,7 @@ const App: React.FC = () => {
     enableLiveWorkspaceApply: false,
     debugTextBudgetChars: DEFAULT_DEBUG_TEXT_BUDGET,
     streamParseCadenceMs: DEFAULT_STREAM_PARSE_CADENCE_MS,
+    ollamaContextSize: DEFAULT_OLLAMA_CONTEXT_SIZE,
     showAdvancedDebug: false,
     showWireDebug: false,
     targetPlatform: 'mac-arm64', 
@@ -383,6 +405,9 @@ const App: React.FC = () => {
   });
   const [testReport, setTestReport] = useState<any>(null);
   const [, setPreviewStatus] = useState<PreviewStatus | null>(null);
+  const [previewPaused, setPreviewPaused] = useState(false);
+  const [previewRestartNonce, setPreviewRestartNonce] = useState(0);
+  const [previewDirtyWhilePaused, setPreviewDirtyWhilePaused] = useState(false);
   const testReportRef = useRef<any>(null);
   const testReportAtRef = useRef<number>(0);
   const previewStatusRef = useRef<PreviewStatus | null>(null);
@@ -396,6 +421,11 @@ const App: React.FC = () => {
     setPreviewStatus(status);
     previewStatusRef.current = status;
     previewStatusAtRef.current = Date.now();
+    if (status.paused) {
+      setPreviewDirtyWhilePaused(Boolean(status.dirtyWhilePaused));
+    } else if (status.candidateOk || !status.dirtyWhilePaused) {
+      setPreviewDirtyWhilePaused(false);
+    }
   }, []);
   const [isDebugOpen, setIsDebugOpen] = useState(false);
   const [runParsed, setRunParsed] = useState<string>('');
@@ -560,6 +590,7 @@ const App: React.FC = () => {
       setConfig(prev => ({
         ...prev,
         ...parsed,
+        apiProvider: parsed.apiProvider ?? inferApiProviderFromUrl(parsed.apiUrl ?? prev.apiUrl),
         providerFamily: parsed.providerFamily ?? prev.providerFamily ?? 'auto',
         samplingProfile: parsed.samplingProfile ?? prev.samplingProfile ?? 'provider-default',
         samplingOverrideEnabled: parsed.samplingOverrideEnabled ?? prev.samplingOverrideEnabled ?? false,
@@ -572,6 +603,17 @@ const App: React.FC = () => {
         enableLiveWorkspaceApply: parsed.enableLiveWorkspaceApply ?? prev.enableLiveWorkspaceApply ?? false,
         debugTextBudgetChars: parsed.debugTextBudgetChars ?? prev.debugTextBudgetChars ?? DEFAULT_DEBUG_TEXT_BUDGET,
         streamParseCadenceMs: parsed.streamParseCadenceMs ?? prev.streamParseCadenceMs ?? DEFAULT_STREAM_PARSE_CADENCE_MS,
+        ollamaContextSize: clampNumber(
+          parsed.ollamaContextSize ?? prev.ollamaContextSize ?? DEFAULT_OLLAMA_CONTEXT_SIZE,
+          DEFAULT_OLLAMA_CONTEXT_SIZE,
+          512,
+          262144
+        ),
+        apiUrl: parsed.apiUrl
+          ? parsed.apiUrl
+          : (parsed.apiProvider === 'ollama'
+              ? DEFAULT_OLLAMA_API_URL
+              : prev.apiUrl),
         showAdvancedDebug: parsed.showAdvancedDebug ?? prev.showAdvancedDebug ?? false,
         showWireDebug: parsed.showWireDebug ?? prev.showWireDebug ?? false
       }));
@@ -703,7 +745,8 @@ const App: React.FC = () => {
     attemptIndex = 1,
     attemptType: 'primary' | 'retry' | 'repair' = isRepairCall ? 'repair' : 'primary',
     applyToWorkspace = true,
-    liveApplyDuringStream = config.enableLiveWorkspaceApply ?? false
+    liveApplyDuringStream = config.enableLiveWorkspaceApply ?? false,
+    isIterationRun = false
   ) => {
     if (selectedVersionId !== 'main') {
       setSelectedVersionId('main');
@@ -713,13 +756,16 @@ const App: React.FC = () => {
     }
 
     const isUpdateCall = chatState.messages.some(m => m.role === 'assistant') || isRepairCall;
+    const isIterationRequest = isIterationRun || (!isRepairCall && isUpdateCall);
     const protocolPrefix = isUpdateCall ? `UPDATE_MODE_ACTIVE:
 - For EXISTING files in PROJECT MAP, prefer <!-- patch: ... -->.
 - If patch ops are not possible, you may output full file content using <!-- filename: ... -->.
 - Never output <tool_call>, <toolcall>, <tool>, <function_call>, or any tool syntax. If you feel you must, rewrite as plain text without any tool wrapper tags.
 - Patch ops MUST follow this format:
   <replace><find>snippet</find><with>new code</with></replace>
-\n\n` : '';
+${isIterationRequest ? `- Iteration mode: prefer ONE focused patch block, ideally for App.tsx, for small/micro changes.
+- Avoid duplicate repeated patch blocks.
+` : ''}\n\n` : '';
 
     const rawPromptText = (manualInput || input).trim();
     const sourceFiles = ensureSeedWorkspaceFiles(baseFiles || chatState.files);
@@ -831,6 +877,12 @@ const App: React.FC = () => {
           if (update.parserStats?.markers) setRunMarkers(update.parserStats.markers);
           if (update.parserStats?.touchedFiles) setRunFiles(update.parserStats.touchedFiles);
           if (update.warnings) setRunWarnings(update.warnings);
+          if (update.lineEditRescueApplied && update.lineEditRescueTarget) {
+            setRunWarnings(prev => Array.from(new Set([
+              ...prev,
+              `AUTO_RECOVER: line-edit rescue applied to ${update.lineEditRescueTarget}.`
+            ])));
+          }
           if (update.hasRealDiff || (update.parserStats?.appliedOps || 0) > 0 || (update.parserStats?.touchedFiles?.length || 0) > 0) {
             hadActionableStreamChange = true;
             lastActionableFiles = update.files;
@@ -871,7 +923,7 @@ const App: React.FC = () => {
           }
         },
         0,
-        { attemptIndex, attemptType }
+        { attemptIndex, attemptType, isIteration: isIterationRequest }
       );
 
       if (!applyToWorkspace) {
@@ -1042,6 +1094,7 @@ const App: React.FC = () => {
       const retryDecision = shouldTriggerSecondAttempt({
         qualityMode: config.qualityMode || 'adaptive-best-of-2',
         isRepairCall,
+        isIteration: isIterationRequest,
         attemptIndex,
         hasHardIssues,
         hasRuntimeIssues,
@@ -1049,6 +1102,9 @@ const App: React.FC = () => {
         inlineNoOp
       });
       if (retryDecision.shouldRetry) {
+        const retryCandidateFile = extractInlineCandidateFile(result.failedPatches) || 'App.tsx';
+        const retryFindSnippet = extractInlineFindSnippet(result.cleanModelText || result.parsedBlocksText || result.rawModelText || '');
+        const retryFileExcerpt = buildFileAnchorExcerpt(sourceFiles[retryCandidateFile] || '', retryFindSnippet, 3);
         const retryPrompt = buildSecondAttemptPrompt({
           basePrompt: rawPromptText,
           protocolErrors: autoRepairableViolations,
@@ -1057,7 +1113,10 @@ const App: React.FC = () => {
           runtimeErrors,
           parserHints,
           noEffectiveChanges,
-          inlineNoOp
+          inlineNoOp,
+          candidateFile: isIterationRequest ? retryCandidateFile : undefined,
+          findSnippet: isIterationRequest ? retryFindSnippet : undefined,
+          fileExcerpt: isIterationRequest ? retryFileExcerpt : undefined
         });
         setRunDecisionReason(`Running second attempt (${retryDecision.reason}).`);
         return handleSend(
@@ -1069,7 +1128,8 @@ const App: React.FC = () => {
           attemptIndex + 1,
           'retry',
           true,
-          liveApplyDuringStream
+          liveApplyDuringStream,
+          isIterationRequest
         );
       }
 
@@ -1133,7 +1193,8 @@ const App: React.FC = () => {
           attemptIndex,
           'repair',
           true,
-          liveApplyDuringStream
+          liveApplyDuringStream,
+          isIterationRequest
         );
       }
 
@@ -1277,7 +1338,8 @@ const App: React.FC = () => {
       1,
       'primary',
       payload.mode !== 'ask',
-      config.enableLiveWorkspaceApply ?? false
+      config.enableLiveWorkspaceApply ?? false,
+      payload.mode === 'iterate'
     );
   };
 
@@ -1533,6 +1595,27 @@ const App: React.FC = () => {
                 <button onClick={() => setViewMode('code')} className={`px-4 py-1 text-xs font-bold uppercase rounded-md transition-all ${viewMode === 'code' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:text-slate-800 dark:hover:text-white'}`}>Code</button>
               </div>
             )}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPreviewPaused(prev => !prev)}
+                className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-[0.08em] border transition-colors ${previewPaused ? 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/20 dark:text-amber-300 dark:border-amber-800/60' : 'bg-white text-slate-600 border-slate-200 dark:bg-ocean-900 dark:text-slate-200 dark:border-ocean-800 hover:bg-slate-50 dark:hover:bg-ocean-800'}`}
+                title={previewPaused ? 'Resume preview auto-refresh' : 'Pause preview auto-refresh'}
+              >
+                {previewPaused ? 'Resume' : 'Pause'}
+              </button>
+              <button
+                onClick={() => setPreviewRestartNonce(prev => prev + 1)}
+                className="px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-[0.08em] border bg-white text-slate-600 border-slate-200 dark:bg-ocean-900 dark:text-slate-200 dark:border-ocean-800 hover:bg-slate-50 dark:hover:bg-ocean-800 transition-colors"
+                title="Restart preview"
+              >
+                Restart
+              </button>
+              {previewPaused && (
+                <span className={`text-[10px] font-semibold ${previewDirtyWhilePaused ? 'text-amber-600 dark:text-amber-300' : 'text-slate-400 dark:text-slate-300'}`}>
+                  {previewDirtyWhilePaused ? 'Changes pending' : 'Paused'}
+                </span>
+              )}
+            </div>
             <div className="relative">
               <button onClick={() => setIsExportMenuOpen(!isExportMenuOpen)} className="flex items-center gap-3 px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-black uppercase tracking-[0.1em] transition-all shadow-xl active:scale-95 group">
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
@@ -1568,6 +1651,8 @@ const App: React.FC = () => {
                  isLoading={chatState.isLoading}
                  devMode={config.devMode}
                  lastGoodFallbackEnabled={(config.previewFailureMode || 'last-good') === 'last-good'}
+                 isPaused={previewPaused}
+                 restartNonce={previewRestartNonce}
                  onPreviewStatus={handlePreviewStatus}
                  onTestReport={handleTestReport}
                />
