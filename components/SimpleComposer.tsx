@@ -80,10 +80,13 @@ const SimpleComposer: React.FC<SimpleComposerProps> = ({
   const buildLabel = isIterationContext ? 'Change/Improve' : 'Make';
   const submitDisabled = isLoading || !isConfigured || (actionMode === 'ask' ? normalizedAsk.length === 0 : !canSubmitSimpleDraft(normalizedDraft));
   const notesLength = (normalizedDraft.notes || '').length;
+  const effectiveBuildDraft = actionMode === 'build'
+    ? (isGuidedOpen ? normalizedDraft : { goal: normalizedDraft.goal })
+    : normalizedDraft;
   const previewText = composeSimplePrompt(
     actionMode === 'ask'
       ? { mode: 'ask', goal: normalizedAsk }
-      : { ...normalizedDraft, mode: isIterationContext ? 'iterate' : 'build' }
+      : { ...effectiveBuildDraft, mode: isIterationContext ? 'iterate' : 'build' }
   );
 
   const triggerSubmit = () => {
@@ -94,7 +97,11 @@ const SimpleComposer: React.FC<SimpleComposerProps> = ({
         goal: normalizedAsk
       });
     } else {
-      onSubmit({ ...normalizedDraft, mode: isIterationContext ? 'iterate' : 'build' });
+      onSubmit({ ...effectiveBuildDraft, mode: isIterationContext ? 'iterate' : 'build' });
+      onDraftChange({
+        ...draft,
+        goal: ''
+      });
     }
     setIsGuidedOpen(false);
   };
@@ -253,15 +260,29 @@ const SimpleComposer: React.FC<SimpleComposerProps> = ({
           )}
         </>
       ) : (
-        <div className="p-3 rounded-lg border border-slate-200 dark:border-ocean-700 bg-slate-50 dark:bg-ocean-950 text-[10px] text-slate-600 dark:text-slate-300 space-y-1">
+        <div className="p-3 rounded-lg border border-slate-200 dark:border-ocean-700 bg-slate-50 dark:bg-ocean-950 text-[10px] text-slate-600 dark:text-slate-300 space-y-2">
           {actionMode === 'ask' ? (
-            <div><span className="font-bold">Ask:</span> {normalizedAsk || 'Not set'}</div>
+            <input
+              value={askInput}
+              onChange={(e) => onAskInputChange(e.target.value)}
+              onKeyDown={submitOnEnter}
+              placeholder="Ask about the current app or next step..."
+              className="w-full bg-white dark:bg-ocean-900 border border-slate-200 dark:border-ocean-700 rounded-lg px-3 py-2 text-xs"
+            />
           ) : (
             <>
-              <div><span className="font-bold">{isIterationContext ? 'Change request' : 'Goal'}:</span> {normalizedDraft.goal || 'Not set'}</div>
-              {normalizedDraft.style && <div><span className="font-bold">Style:</span> {normalizedDraft.style}</div>}
-              {normalizedDraft.mustHave && <div><span className="font-bold">Must-have:</span> {normalizedDraft.mustHave}</div>}
-              {normalizedDraft.notes && <div><span className="font-bold">Notes:</span> {normalizedDraft.notes}</div>}
+              <input
+                value={draft.goal || ''}
+                onChange={(e) => updateField('goal', e.target.value)}
+                onKeyDown={submitOnEnter}
+                placeholder={isIterationContext ? "What should I change or improve?" : "What should I build?"}
+                className="w-full bg-white dark:bg-ocean-900 border border-slate-200 dark:border-ocean-700 rounded-lg px-3 py-2 text-xs"
+              />
+              {(normalizedDraft.style || normalizedDraft.mustHave || normalizedDraft.notes) && (
+                <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                  Advanced fields are stored but ignored while collapsed.
+                </div>
+              )}
             </>
           )}
         </div>
