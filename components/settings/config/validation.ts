@@ -11,6 +11,7 @@ const toNumber = (value: unknown, fallback: number): number => {
 export const withConfigDefaults = (config: AppConfig): AppConfig => {
   return {
     ...config,
+    apiProvider: config.apiProvider ?? 'lmstudio',
     providerFamily: config.providerFamily ?? 'auto',
     samplingProfile: config.samplingProfile ?? 'provider-default',
     samplingOverrideEnabled: config.samplingOverrideEnabled ?? false,
@@ -23,6 +24,7 @@ export const withConfigDefaults = (config: AppConfig): AppConfig => {
     enableLiveWorkspaceApply: config.enableLiveWorkspaceApply ?? false,
     debugTextBudgetChars: config.debugTextBudgetChars ?? 400000,
     streamParseCadenceMs: config.streamParseCadenceMs ?? 120,
+    ollamaContextSize: config.ollamaContextSize ?? 32000,
     showAdvancedDebug: config.showAdvancedDebug ?? false,
     showWireDebug: config.showWireDebug ?? false,
     modelTierPreference: config.modelTierPreference ?? 'auto'
@@ -36,6 +38,7 @@ export const normalizeConfigDraft = (config: AppConfig): AppConfig => {
   next.autoRepairAttempts = clamp(toNumber(next.autoRepairAttempts, 3), 0, 5);
   next.debugTextBudgetChars = clamp(toNumber(next.debugTextBudgetChars, 400000), 20000, 2000000);
   next.streamParseCadenceMs = clamp(toNumber(next.streamParseCadenceMs, 120), 40, 1000);
+  next.ollamaContextSize = clamp(toNumber(next.ollamaContextSize, 32000), 512, 262144);
 
   if (!next.samplingOverrideEnabled) {
     next.samplingProfile = 'provider-default';
@@ -72,6 +75,24 @@ export const validateConfigDraft = ({ config, detectedTier }: ValidationInput): 
       field: 'model',
       message: 'Model is required.'
     });
+  }
+
+  if ((config.apiProvider ?? 'lmstudio') === 'ollama') {
+    const ctx = Number(config.ollamaContextSize);
+    if (!Number.isFinite(ctx) || ctx < 512 || ctx > 262144) {
+      issues.push({
+        severity: 'error',
+        field: 'ollamaContextSize',
+        message: 'Ollama Context Size must be a number between 512 and 262144.'
+      });
+    }
+    if ((config.apiUrl || '').includes('/v1/chat/completions')) {
+      issues.push({
+        severity: 'warning',
+        field: 'apiUrl',
+        message: 'Ollama provider selected: URL will be normalized to /api/chat at runtime.'
+      });
+    }
   }
 
   if (detectedTier === 'unknown' && (config.modelTierPreference ?? 'auto') === 'auto') {
